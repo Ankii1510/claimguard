@@ -52,7 +52,12 @@ export function getContractAddress(): string {
     // Return empty string during build, error will be shown in UI during runtime
     return "";
   }
-  return address;
+  // GenLayer Studio displays contract addresses with mixed case that does NOT
+  // follow the EIP-55 checksum standard. viem (used by genlayer-js) rejects
+  // addresses whose mixed-case pattern does not validate as EIP-55. The
+  // underlying 20-byte address is case-insensitive, so lowercase is safe and
+  // is accepted by both viem and the GenLayer RPC.
+  return address.trim().toLowerCase();
 }
 
 /**
