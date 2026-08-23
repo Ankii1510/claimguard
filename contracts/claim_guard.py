@@ -1,7 +1,7 @@
 # { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from genlayer import *
 
 # ---- Governance constants ----
@@ -21,10 +21,14 @@ class Source:
     down_votes: str
 
 
-@allow_storage
 @dataclass
 class Claim:
-    """A claim with its settled (or pending) verdict."""
+    """A claim with its settled (or pending) verdict.
+
+    Note: stored as JSON string inside TreeMap (not directly), so we drop
+    @allow_storage. The schema parser used by GenLayer Studio rejects nested
+    TreeMaps; we flatten by encoding claims as JSON keyed by "owner:claim_id".
+    """
 
     id: str
     text: str
@@ -33,7 +37,7 @@ class Claim:
     confidence: str
     reasoning: str
     has_resolved: bool
-    challenge_status: str  # "none" | "overturned" | "upheld"
+    challenge_status: str
     challenged_by: str
 
 
@@ -47,8 +51,39 @@ class Challenge:
     challenger: str
     counter_evidence: str
     stake: str
-    outcome: str  # "won" | "lost"
+    outcome: str
     resolved: bool
+
+
+def _claim_key(owner_hex: str, claim_id: str) -> str:
+    """Composite key for the claims TreeMap (owner + claim id).
+
+    Note: owner_hex must be in the same case format used at the call site
+    (typically EIP-55 checksummed `Address.as_hex`). Do NOT lowercase here,
+    or test fixtures that look up by checksummed address will not match.
+    """
+    return f"{owner_hex}:{claim_id}"
+
+
+def _vote_key(domain: str, voter_hex: str) -> str:
+    """Composite key for the votes TreeMap (domain + voter).
+
+    Domain is lowercased so a source's reputation is case-insensitive, but
+    voter_hex is kept as-is to stay consistent with Address.as_hex lookups.
+    """
+    return f"{domain.lower()}:{voter_hex}"
+
+
+def _serialize_claim(c) -> str:
+    """Stable JSON for a Claim-like object (Claim or dict)."""
+    if hasattr(c, "__dataclass_fields__"):
+        return json.dumps(asdict(c), sort_keys=True)
+    return json.dumps(c, sort_keys=True)
+
+
+def _deserialize_claim(raw: str) -> dict:
+    """JSON -> dict matching Claim field names."""
+    return json.loads(raw)
 
 
 class ClaimGuard(gl.Contract):
@@ -63,18 +98,25 @@ class ClaimGuard(gl.Contract):
     Independent parties can contest a settled verdict by staking value in a
     challenge, and downstream parties can consume settled verdicts in a
     consequential workflow by paying a fee that flows to the claim owner.
+
+    Storage note: claims and votes use flat TreeMap[str, str] with composite
+    keys and JSON-encoded values. This avoids the nested-TreeMap pattern that
+    the current GenLayer Studio schema parser rejects with
+    "Could not load contract schema".
     """
 
-    claims: TreeMap[Address, TreeMap[str, Claim]]
+    # Flattened: key = "owner_hex:claim_id", value = JSON Claim
+    claims: TreeMap[str, str]
     claim_count: u256
 
     sources: TreeMap[str, Source]
-    votes: TreeMap[str, TreeMap[Address, str]]  # domain -> voter -> "up"/"down"
+    # Flattened: key = "domain:voter_hex", value = "up" | "down"
+    votes: TreeMap[str, str]
 
     challenges: TreeMap[str, Challenge]
     challenge_count: u256
 
-    escrow: TreeMap[str, str]  # hex address -> claimable amount (decimal str)
+    escrow: TreeMap[str, str]   # hex address -> claimable amount (decimal str)
     consumers: TreeMap[str, str]  # claim_id -> JSON list of consumer addresses
 
     def __init__(self):
@@ -112,10 +154,24 @@ class ClaimGuard(gl.Contract):
         cur = int(self.escrow.get(addr_hex) or "0")
         self.escrow[addr_hex] = str(cur + amount)
 
+    def _load_claim(self, owner_hex: str, claim_id: str):
+        """Return (claim_dict, owner_hex). Raises if missing."""
+        raw = self.claims.get(_claim_key(owner_hex, claim_id))
+        if raw is None:
+            raise gl.vm.UserError("Claim not found")
+        return _deserialize_claim(raw), owner_hex
+
+    def _save_claim(self, owner_hex: str, c) -> None:
+        """Persist a Claim dataclass (or dict with same fields) as JSON."""
+        self.claims[_claim_key(owner_hex, c.id)] = _serialize_claim(c)
+
     def _find_claim(self, claim_id: str):
-        for owner_addr, cmap in self.claims.items():
-            if claim_id in cmap:
-                return owner_addr, cmap[claim_id]
+        """Find a claim by id across all owners. Returns (owner_hex, claim_dict)."""
+        suffix = ":" + claim_id
+        for k in self.claims.keys():
+            if k.endswith(suffix):
+                owner_hex = k[: -len(suffix)]
+                return owner_hex, _deserialize_claim(self.claims[k])
         raise gl.vm.UserError("Claim not found")
 
     def _analyze(self, claim_text: str, source_urls: str) -> dict:
@@ -161,8 +217,10 @@ class ClaimGuard(gl.Contract):
 
         self._ensure_source(domain)
         voter = gl.message.sender_address
-        inner = self.votes.get_or_insert_default(domain)
-        prev = inner.get(voter)
+        voter_hex = voter.as_hex.lower()
+        vkey = _vote_key(domain, voter_hex)
+
+        prev = self.votes.get(vkey)
 
         src = self.sources[domain]
         if prev == "up":
@@ -172,10 +230,10 @@ class ClaimGuard(gl.Contract):
 
         if reliable:
             src.up_votes = str(int(src.up_votes) + 1)
-            inner[voter] = "up"
+            self.votes[vkey] = "up"
         else:
             src.down_votes = str(int(src.down_votes) + 1)
-            inner[voter] = "down"
+            self.votes[vkey] = "down"
 
     @gl.public.view
     def get_source(self, domain: str) -> dict:
@@ -212,7 +270,7 @@ class ClaimGuard(gl.Contract):
         self.claim_count = u256(int(self.claim_count) + 1)
         claim_id = str(self.claim_count)
 
-        self.claims.get_or_insert_default(sender)[claim_id] = Claim(
+        new_claim = Claim(
             id=claim_id,
             text=claim_text,
             source_urls=source_urls,
@@ -223,22 +281,29 @@ class ClaimGuard(gl.Contract):
             challenge_status="none",
             challenged_by="",
         )
+        self._save_claim(sender.as_hex, new_claim)
         return claim_id
 
     @gl.public.write
     def verify_claim(self, claim_id: str) -> None:
         sender = gl.message.sender_address
-        claim = self.claims[sender][claim_id]
+        owner_hex = sender.as_hex
 
-        if claim.has_resolved:
+        claim_dict, _ = self._load_claim(owner_hex, claim_id)
+
+        if claim_dict["has_resolved"]:
             raise gl.vm.UserError("Claim already verified")
 
-        result = self._analyze(claim.text, claim.source_urls)
+        result = self._analyze(claim_dict["text"], claim_dict["source_urls"])
 
-        claim.has_resolved = True
-        claim.verdict = str(result["verdict"])
-        claim.confidence = str(result["confidence"])
-        claim.reasoning = str(result["reasoning"])
+        claim_dict["has_resolved"] = True
+        claim_dict["verdict"] = str(result["verdict"])
+        claim_dict["confidence"] = str(result["confidence"])
+        claim_dict["reasoning"] = str(result["reasoning"])
+
+        # Reconstruct the Claim dataclass to keep field order stable on save.
+        updated = Claim(**claim_dict)
+        self._save_claim(owner_hex, updated)
 
     # ---- challenge path ----------------------------------------------------
 
@@ -256,37 +321,40 @@ class ClaimGuard(gl.Contract):
         if stake < CHALLENGE_STAKE:
             raise gl.vm.UserError("Insufficient stake to challenge")
 
-        owner, claim = self._find_claim(claim_id)
-        if not claim.has_resolved:
+        owner_hex, claim_dict = self._find_claim(claim_id)
+        if not claim_dict["has_resolved"]:
             raise gl.vm.UserError("Claim is not resolved yet")
-        if claim.challenge_status != "none":
+        if claim_dict["challenge_status"] != "none":
             raise gl.vm.UserError("Claim already challenged")
 
-        combined = claim.source_urls
+        combined = claim_dict["source_urls"]
         if counter_evidence.strip() != "":
             combined = combined + "\n" + counter_evidence
 
-        result = self._analyze(claim.text, combined)
+        result = self._analyze(claim_dict["text"], combined)
         new_verdict = str(result["verdict"])
 
         self.challenge_count = u256(int(self.challenge_count) + 1)
         challenge_id = str(self.challenge_count)
 
-        if new_verdict != claim.verdict:
+        if new_verdict != claim_dict["verdict"]:
             # Challenger wins: correct the record, refund stake + reward.
-            claim.verdict = new_verdict
-            claim.confidence = str(result["confidence"])
-            claim.reasoning = str(result["reasoning"])
-            claim.challenge_status = "overturned"
-            claim.challenged_by = sender.as_hex
+            claim_dict["verdict"] = new_verdict
+            claim_dict["confidence"] = str(result["confidence"])
+            claim_dict["reasoning"] = str(result["reasoning"])
+            claim_dict["challenge_status"] = "overturned"
+            claim_dict["challenged_by"] = sender.as_hex
             self._add_escrow(sender.as_hex, stake * 2)
             outcome = "won"
         else:
             # Challenger loses: stake forfeited to the claim owner.
-            claim.challenge_status = "upheld"
-            claim.challenged_by = sender.as_hex
-            self._add_escrow(owner.as_hex, stake)
+            claim_dict["challenge_status"] = "upheld"
+            claim_dict["challenged_by"] = sender.as_hex
+            self._add_escrow(owner_hex, stake)
             outcome = "lost"
+
+        # Persist the (possibly updated) claim back to its owner.
+        self._save_claim(owner_hex, Claim(**claim_dict))
 
         self.challenges[challenge_id] = Challenge(
             id=challenge_id,
@@ -312,12 +380,12 @@ class ClaimGuard(gl.Contract):
         if fee < CONSUME_FEE:
             raise gl.vm.UserError("Insufficient fee to consume verdict")
 
-        owner, claim = self._find_claim(claim_id)
-        if not claim.has_resolved:
+        owner_hex, claim_dict = self._find_claim(claim_id)
+        if not claim_dict["has_resolved"]:
             raise gl.vm.UserError("Verdict not settled yet")
 
         consumer = gl.message.sender_address
-        self._add_escrow(owner.as_hex, fee)
+        self._add_escrow(owner_hex, fee)
 
         lst = json.loads(self.consumers.get(claim_id) or "[]")
         if consumer.as_hex not in lst:
@@ -326,31 +394,23 @@ class ClaimGuard(gl.Contract):
 
         return {
             "claim_id": claim_id,
-            "verdict": claim.verdict,
-            "confidence": claim.confidence,
-            "reasoning": claim.reasoning,
+            "verdict": claim_dict["verdict"],
+            "confidence": claim_dict["confidence"],
+            "reasoning": claim_dict["reasoning"],
         }
 
     # ---- views -------------------------------------------------------------
 
     @gl.public.view
     def get_claims(self) -> dict:
-        out = {}
-        for addr, cmap in self.claims.items():
-            out[addr.as_hex] = {
-                cid: {
-                    "id": c.id,
-                    "text": c.text,
-                    "source_urls": c.source_urls,
-                    "verdict": c.verdict,
-                    "confidence": c.confidence,
-                    "reasoning": c.reasoning,
-                    "has_resolved": c.has_resolved,
-                    "challenge_status": c.challenge_status,
-                    "challenged_by": c.challenged_by,
-                }
-                for cid, c in cmap.items()
-            }
+        """Return {owner_hex: {claim_id: claim_dict}}."""
+        out: dict = {}
+        for k in self.claims.keys():
+            owner_hex, claim_id = k.rsplit(":", 1)
+            claim_dict = _deserialize_claim(self.claims[k])
+            if owner_hex not in out:
+                out[owner_hex] = {}
+            out[owner_hex][claim_id] = claim_dict
         return out
 
     @gl.public.view

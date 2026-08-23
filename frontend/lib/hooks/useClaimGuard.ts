@@ -20,9 +20,33 @@ export function useClaimGuardContract(): ClaimGuard | null {
 
   const contract = useMemo(() => {
     if (!contractAddress) {
+      // Log full diagnostic to console so it's visible in browser DevTools
+      console.error(
+        "[ClaimGuard] NEXT_PUBLIC_CONTRACT_ADDRESS is not set. " +
+          "Set it in your .env file (local) or Vercel Project Settings > Environment Variables (production)."
+      );
       configError(
-        "Setup Required",
-        "Contract address not configured. Please set NEXT_PUBLIC_CONTRACT_ADDRESS in your .env file.",
+        "Setup Required: Contract not configured",
+        "NEXT_PUBLIC_CONTRACT_ADDRESS is missing. Add it to Vercel env vars, then redeploy.",
+        {
+          label: "Vercel Docs",
+          onClick: () =>
+            window.open(
+              "https://vercel.com/docs/projects/environment-variables",
+              "_blank"
+            ),
+        }
+      );
+      return null;
+    }
+
+    try {
+      return new ClaimGuard(contractAddress, address, studioUrl);
+    } catch (err: any) {
+      console.error("[ClaimGuard] Failed to initialize contract:", err);
+      configError(
+        "Contract init failed",
+        err?.message || String(err),
         {
           label: "Setup Guide",
           onClick: () => window.open("/docs/setup", "_blank"),
@@ -30,8 +54,6 @@ export function useClaimGuardContract(): ClaimGuard | null {
       );
       return null;
     }
-
-    return new ClaimGuard(contractAddress, address, studioUrl);
   }, [contractAddress, address, studioUrl]);
 
   return contract;
