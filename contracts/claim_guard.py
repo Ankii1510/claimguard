@@ -175,7 +175,10 @@ class ClaimGuard(gl.Contract):
         raise gl.vm.UserError("Claim not found")
 
     def _analyze(self, claim_text: str, source_urls: str) -> dict:
-        def get_verdict() -> str:
+        # Leader proposes a verdict; validators judge it against criteria.
+        # strict_eq is wrong for LLM output (non-deterministic). See:
+        # https://docs.genlayer.com/developers/intelligent-contracts/examples/llm-hello-world
+        def get_input() -> str:
             gathered = ""
             for url in source_urls.split("\n"):
                 url = url.strip()
@@ -187,8 +190,7 @@ class ClaimGuard(gl.Contract):
                     page = "[ERROR] could not fetch this source"
                 gathered += "=== SOURCE: " + url + " ===\n" + page + "\n\n"
 
-            task = (
-                "You are a rigorous fact-checking engine.\n\n"
+            return (
                 "CLAIM:\n" + claim_text + "\n\n"
                 "EVIDENCE (from the web):\n" + gathered + "\n\n"
                 "Decide whether the CLAIM is TRUE, FALSE or UNCERTAIN using ONLY "
@@ -201,10 +203,37 @@ class ClaimGuard(gl.Contract):
                 "Use \"TRUE\", \"FALSE\" or \"UNCERTAIN\" for verdict and an integer "
                 "0-100 for confidence."
             )
-            result = gl.nondet.exec_prompt(task, response_format="json")
-            return json.dumps(result, sort_keys=True)
 
-        return json.loads(gl.eq_principle.strict_eq(get_verdict))
+        criteria = (
+            "The response is valid JSON with exactly three fields:\n"
+            '  - "verdict": one of "TRUE", "FALSE", or "UNCERTAIN" (uppercase, no other text)\n'
+            '  - "confidence": integer between 0 and 100\n'
+            '  - "reasoning": one short sentence explaining the verdict\n'
+            "The verdict must be justified by the cited web evidence. If the "
+            "evidence does not support or contradict the claim, the verdict must be "
+            "UNCERTAIN. The verdict must NOT be invented or unsupported."
+        )
+
+        raw = gl.eq_principle.prompt_non_comparative(
+            get_input,
+            task=(
+                "You are a rigorous fact-checking engine. Read the CLAIM and the "
+                "gathered EVIDENCE, then return a JSON object with the verdict, "
+                "confidence, and a one-sentence reasoning. Do not invent facts."
+            ),
+            criteria=criteria,
+        )
+
+        if raw is None:
+            raise gl.vm.UserError(
+                "AI consensus did not return a verdict. Validators did not "
+                "accept the leader's response. Try again with more reliable sources."
+            )
+
+        # prompt_non_comparative returns the leader's string output (or dict).
+        if isinstance(raw, str):
+            return json.loads(raw)
+        return raw
 
     # ---- source governance -------------------------------------------------
 
