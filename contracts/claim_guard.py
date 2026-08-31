@@ -68,10 +68,29 @@ def _claim_key(owner_hex: str, claim_id: str) -> str:
 def _vote_key(domain: str, voter_hex: str) -> str:
     """Composite key for the votes TreeMap (domain + voter).
 
-    Domain is lowercased so a source's reputation is case-insensitive, but
-    voter_hex is kept as-is to stay consistent with Address.as_hex lookups.
+    Domain is expected to already be canonicalized (see _canon_domain) so a
+    source's reputation is case-insensitive, but voter_hex is kept as-is to
+    stay consistent with Address.as_hex lookups.
     """
-    return f"{domain.lower()}:{voter_hex}"
+    return f"{_canon_domain(domain)}:{voter_hex}"
+
+
+def _canon_domain(domain: str) -> str:
+    """Canonical form of a domain used as the key for both the `sources`
+    TreeMap and the `votes` TreeMap.
+
+    Domain names are case-insensitive (Example.com and example.com are the
+    same website), so every place that reads or writes source reputation
+    must agree on one canonical key. Previously `_vote_key` lowercased the
+    domain while `_ensure_source`/`sources[domain]` did not, so the same
+    voter voting on two different-case spellings of the same domain would
+    read/write two different Source records - corrupting the up/down
+    counters (including driving a counter negative) and letting anyone
+    inflate a source's reputation past what real votes justify, bypassing
+    the negative-reputation rejection in submit_claim. Canonicalizing here
+    ensures `sources` and `votes` always agree on the same key.
+    """
+    return domain.strip().lower()
 
 
 def _serialize_claim(c) -> str:
@@ -138,14 +157,15 @@ class ClaimGuard(gl.Contract):
         slash = u.find("/")
         if slash != -1:
             u = u[:slash]
-        return u
+        return _canon_domain(u)
 
     def _ensure_source(self, domain: str) -> None:
+        domain = _canon_domain(domain)
         if domain not in self.sources:
             self.sources[domain] = Source(domain=domain, up_votes="0", down_votes="0")
 
     def _reputation(self, domain: str) -> int:
-        src = self.sources.get(domain)
+        src = self.sources.get(_canon_domain(domain))
         if src is None:
             return 0
         return int(src.up_votes) - int(src.down_votes)
@@ -240,7 +260,7 @@ class ClaimGuard(gl.Contract):
     @gl.public.write
     def vote_source(self, domain: str, reliable: bool) -> None:
         """Vote on a source domain's reliability (one vote per address)."""
-        domain = domain.strip()
+        domain = _canon_domain(domain)
         if domain == "":
             raise gl.vm.UserError("Source domain cannot be empty")
 
@@ -267,7 +287,7 @@ class ClaimGuard(gl.Contract):
     @gl.public.view
     def get_source(self, domain: str) -> dict:
         """Transparent view of a source domain's reputation."""
-        domain = domain.strip()
+        domain = _canon_domain(domain)
         return {
             "domain": domain,
             "up_votes": self.sources.get(domain).up_votes if self.sources.get(domain) is not None else "0",
