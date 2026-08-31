@@ -1,0 +1,141 @@
+diff --git a/contracts/claim_guard.py b/contracts/claim_guard.py
+index d68ac3a..c275137 100644
+--- a/contracts/claim_guard.py
++++ b/contracts/claim_guard.py
+@@ -68,10 +68,29 @@ def _claim_key(owner_hex: str, claim_id: str) -> str:
+ def _vote_key(domain: str, voter_hex: str) -> str:
+     """Composite key for the votes TreeMap (domain + voter).
+ 
+-    Domain is lowercased so a source's reputation is case-insensitive, but
+-    voter_hex is kept as-is to stay consistent with Address.as_hex lookups.
++    Domain is expected to already be canonicalized (see _canon_domain) so a
++    source's reputation is case-insensitive, but voter_hex is kept as-is to
++    stay consistent with Address.as_hex lookups.
+     """
+-    return f"{domain.lower()}:{voter_hex}"
++    return f"{_canon_domain(domain)}:{voter_hex}"
++
++
++def _canon_domain(domain: str) -> str:
++    """Canonical form of a domain used as the key for both the `sources`
++    TreeMap and the `votes` TreeMap.
++
++    Domain names are case-insensitive (Example.com and example.com are the
++    same website), so every place that reads or writes source reputation
++    must agree on one canonical key. Previously `_vote_key` lowercased the
++    domain while `_ensure_source`/`sources[domain]` did not, so the same
++    voter voting on two different-case spellings of the same domain would
++    read/write two different Source records - corrupting the up/down
++    counters (including driving a counter negative) and letting anyone
++    inflate a source's reputation past what real votes justify, bypassing
++    the negative-reputation rejection in submit_claim. Canonicalizing here
++    ensures `sources` and `votes` always agree on the same key.
++    """
++    return domain.strip().lower()
+ 
+ 
+ def _serialize_claim(c) -> str:
+@@ -138,14 +157,15 @@ class ClaimGuard(gl.Contract):
+         slash = u.find("/")
+         if slash != -1:
+             u = u[:slash]
+-        return u
++        return _canon_domain(u)
+ 
+     def _ensure_source(self, domain: str) -> None:
++        domain = _canon_domain(domain)
+         if domain not in self.sources:
+             self.sources[domain] = Source(domain=domain, up_votes="0", down_votes="0")
+ 
+     def _reputation(self, domain: str) -> int:
+-        src = self.sources.get(domain)
++        src = self.sources.get(_canon_domain(domain))
+         if src is None:
+             return 0
+         return int(src.up_votes) - int(src.down_votes)
+@@ -240,7 +260,7 @@ class ClaimGuard(gl.Contract):
+     @gl.public.write
+     def vote_source(self, domain: str, reliable: bool) -> None:
+         """Vote on a source domain's reliability (one vote per address)."""
+-        domain = domain.strip()
++        domain = _canon_domain(domain)
+         if domain == "":
+             raise gl.vm.UserError("Source domain cannot be empty")
+ 
+@@ -267,7 +287,7 @@ class ClaimGuard(gl.Contract):
+     @gl.public.view
+     def get_source(self, domain: str) -> dict:
+         """Transparent view of a source domain's reputation."""
+-        domain = domain.strip()
++        domain = _canon_domain(domain)
+         return {
+             "domain": domain,
+             "up_votes": self.sources.get(domain).up_votes if self.sources.get(domain) is not None else "0",
+diff --git a/tests/direct/test_claim_guard_unit.py b/tests/direct/test_claim_guard_unit.py
+index ff75389..52a93f0 100644
+--- a/tests/direct/test_claim_guard_unit.py
++++ b/tests/direct/test_claim_guard_unit.py
+@@ -55,14 +55,12 @@ def test_get_source_for_unknown_domain_returns_zeros(
+     assert src["domain"] == "never-voted.com"
+ 
+ 
+-def test_vote_source_case_sensitive_on_source_record(
++def test_vote_source_case_insensitive_on_source_record(
+     direct_vm, direct_deploy, direct_alice, direct_bob
+ ):
+-    """Source records are keyed by the exact domain string of the first
+-    vote. The Source record for EXAMPLE.com and example.com are distinct.
+-    (Vote counts use lowercase keys for aggregation, but the Source record
+-    itself preserves case - this is an intentional quirk of the contract,
+-    see _ensure_source in contracts/claim_guard.py.)"""
++    """Source records are keyed by the canonicalized (lowercased) domain, so
++    EXAMPLE.com and example.com share the same Source record and the same
++    reputation, regardless of which case each voter used."""
+     contract = direct_deploy("contracts/claim_guard.py")
+ 
+     direct_vm.sender = direct_alice
+@@ -71,15 +69,40 @@ def test_vote_source_case_sensitive_on_source_record(
+     direct_vm.sender = direct_bob
+     contract.vote_source("example.com", True)
+ 
+-    # Each domain case is its own Source record.
++    # Both votes land on the single, canonical "example.com" Source record.
+     src_upper = contract.get_source("EXAMPLE.com")
+     src_lower = contract.get_source("example.com")
+-    assert src_upper["up_votes"] == "1"
+-    assert src_upper["domain"] == "EXAMPLE.com"
+-    assert src_lower["up_votes"] == "1"
++    assert src_upper == src_lower
++    assert src_lower["up_votes"] == "2"
+     assert src_lower["domain"] == "example.com"
+ 
+ 
++def test_vote_source_same_voter_different_case_does_not_corrupt_counters(
++    direct_vm, direct_deploy, direct_alice
++):
++    """Regression test: previously, _vote_key lowercased the domain while
++    _ensure_source/sources[domain] did not, so the same voter voting on two
++    different-case spellings of the same domain would read/write two
++    different Source records. That let a vote toggle land on the wrong
++    record's counter, driving it negative and inflating net reputation past
++    what real votes justify - silently defeating the negative-reputation
++    rejection in submit_claim. Canonicalizing the domain everywhere fixes
++    this: a down-vote followed by an up-vote (different case, same voter) on
++    the same domain must net to a single up-vote, with no negative counters."""
++    contract = direct_deploy("contracts/claim_guard.py")
++    direct_vm.sender = direct_alice
++
++    contract.vote_source("Example.com", False)
++    contract.vote_source("example.com", True)
++
++    src = contract.get_source("EXAMPLE.COM")
++    assert int(src["up_votes"]) >= 0
++    assert int(src["down_votes"]) >= 0
++    assert src["up_votes"] == "1"
++    assert src["down_votes"] == "0"
++    assert src["reputation"] == 1
++
++
+ def test_vote_source_toggle_up_down_up_resets(
+     direct_vm, direct_deploy, direct_alice
+ ):
