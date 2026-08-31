@@ -20,6 +20,34 @@ export const GENLAYER_NETWORK = {
   blockExplorerUrls: [],
 };
 
+/**
+ * Single source of truth for the GenLayer chain configuration used by
+ * the SDK client and the viem wallet client.
+ *
+ * Built from NEXT_PUBLIC_* environment variables on top of the SDK's
+ * `studionet` defaults. Spreading `studionet` first means any field
+ * we don't override (blockExplorers, contracts, testnet flag, etc.)
+ * comes from studionet as a safe fallback. The fields we DO override
+ * (id, name, rpcUrls, nativeCurrency) come from environment variables
+ * so deploying the same frontend to a non-Studio GenLayer environment
+ * (mainnet, a custom testnet, a local simulator) is purely a .env /
+ * Vercel env-var change - no code edit required.
+ *
+ * Without this, hardcoding `chain: studionet` in createClient /
+ * createWalletClient would silently keep the frontend pinned to Studio
+ * even if NEXT_PUBLIC_GENLAYER_RPC_URL was pointed elsewhere.
+ */
+export const GENLAYER_CHAIN = {
+  ...studionet,
+  id: GENLAYER_CHAIN_ID,
+  name: GENLAYER_NETWORK.chainName,
+  rpcUrls: {
+    default: { http: GENLAYER_NETWORK.rpcUrls },
+    public: { http: GENLAYER_NETWORK.rpcUrls },
+  },
+  nativeCurrency: GENLAYER_NETWORK.nativeCurrency,
+};
+
 // Ethereum provider type from window
 interface EthereumProvider {
   isMetaMask?: boolean;
@@ -286,7 +314,7 @@ export function createMetaMaskWalletClient(): WalletClient | null {
 
   try {
     return createWalletClient({
-      chain: studionet as any,
+      chain: GENLAYER_CHAIN as any,
       transport: custom(provider),
     });
   } catch (error) {
@@ -304,7 +332,7 @@ export function createMetaMaskWalletClient(): WalletClient | null {
  */
 export function createGenLayerClient(address?: string) {
   const config: any = {
-    chain: studionet,
+    chain: GENLAYER_CHAIN,
   };
 
   if (address) {
@@ -317,7 +345,7 @@ export function createGenLayerClient(address?: string) {
     console.error("Error creating GenLayer client:", error);
     // Return client without account on error
     return createClient({
-      chain: studionet,
+      chain: GENLAYER_CHAIN,
     });
   }
 }

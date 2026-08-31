@@ -270,6 +270,8 @@ export function ClaimList() {
         onOpenChange={handleDialogOpenChange}
         onConfirm={handleConfirmVerify}
         isVerifying={isVerifying && verifyingClaimId === pendingVerifyId}
+        feePresetLevel={feePresetLevel}
+        onFeePresetChange={setFeePresetLevel}
       />
     </>
   );

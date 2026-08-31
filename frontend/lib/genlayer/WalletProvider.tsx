@@ -5,6 +5,7 @@ import {
   isMetaMaskInstalled,
   connectMetaMask,
   switchAccount,
+  switchToGenLayerNetwork,
   getAccounts,
   getCurrentChainId,
   isOnGenLayerNetwork,
@@ -29,6 +30,7 @@ interface WalletContextValue extends WalletState {
   connectWallet: () => Promise<string>;
   disconnectWallet: () => void;
   switchWalletAccount: () => Promise<string>;
+  switchToCorrectNetwork: () => Promise<void>;
 }
 
 // Create context with undefined default (will error if used outside Provider)
@@ -299,11 +301,45 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  /**
+   * Request MetaMask to switch to the GenLayer Studio network. After the
+   * switch, re-read chainId and refresh isOnCorrectNetwork so dependent
+   * UI (the submit modal in particular) re-evaluates immediately.
+   *
+   * Re-throws on failure so callers can surface a toast. wallet_switchEthereumChain
+   * code 4902 (chain not added) is handled inside switchToGenLayerNetwork by
+   * falling through to wallet_addEthereumChain.
+   */
+  const switchToCorrectNetwork = useCallback(async () => {
+    try {
+      await switchToGenLayerNetwork();
+      const chainId = await getCurrentChainId();
+      const correctNetwork = await isOnGenLayerNetwork();
+      setState((prev) => ({
+        ...prev,
+        chainId,
+        isOnCorrectNetwork: correctNetwork,
+      }));
+    } catch (err: any) {
+      console.error("Error switching network:", err);
+      if (err?.message?.includes("rejected")) {
+        userRejected("Network switch cancelled");
+      } else {
+        error("Failed to switch network", {
+          description:
+            err?.message || "Please switch MetaMask to GenLayer Studio manually.",
+        });
+      }
+      throw err;
+    }
+  }, []);
+
   const value: WalletContextValue = {
     ...state,
     connectWallet,
     disconnectWallet,
     switchWalletAccount,
+    switchToCorrectNetwork,
   };
 
   return <WalletContext.Provider value={value}>{children}</WalletContext.Provider>;

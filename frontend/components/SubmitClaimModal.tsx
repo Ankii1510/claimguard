@@ -51,8 +51,8 @@ function validateUrls(raw: string): string | null {
 }
 
 export function SubmitClaimModal() {
-  const { isConnected, address, isLoading } = useWallet();
-  const { submitClaim, isSubmitting } = useSubmitClaim();
+  const { isConnected, address, isLoading, isOnCorrectNetwork, switchToCorrectNetwork } = useWallet();
+  const { submitClaim, isSubmitting, isSuccess } = useSubmitClaim();
 
   const [isOpen, setIsOpen] = useState(false);
   const [claimText, setClaimText] = useState("");
@@ -63,10 +63,25 @@ export function SubmitClaimModal() {
     claimText: false,
     sourceUrls: false,
   });
+  const [isSwitchingNetwork, setIsSwitchingNetwork] = useState(false);
 
-  // Auto-close modal when wallet disconnects
+  const handleSwitchNetwork = async () => {
+    setIsSwitchingNetwork(true);
+    try {
+      await switchToCorrectNetwork();
+    } catch {
+      // The hook already surfaces the error toast; we just need to make
+      // sure the button is re-enabled.
+    } finally {
+      setIsSwitchingNetwork(false);
+    }
+  };
+
+  // Auto-close modal when wallet disconnects. Reset form too so the next
+  // open starts fresh.
   useEffect(() => {
     if (!isConnected && isOpen && !isSubmitting) {
+      resetForm();
       setIsOpen(false);
     }
   }, [isConnected, isOpen, isSubmitting]);
@@ -131,23 +146,42 @@ export function SubmitClaimModal() {
   };
 
   useEffect(() => {
-    // mutate() doesn't expose isSuccess directly anymore; treat the transition
-    // from submitting -> idle as success and close the modal. Since the parent
-    // toast handles the message, we just react to isSubmitting turning false.
-    if (!isSubmitting && touched.claimText && claimText) {
-      // Likely finished a submit successfully; close the modal.
+    // Close the modal ONLY on actual success, never on initial mount and
+    // never on submission failure.
+    //
+    // Why isSuccess (and not !isSubmitting):
+    // - isSubmitting starts false, so a !isSubmitting-only check fires on
+    //   mount and would close the modal the instant the user types anything.
+    // - When submission fails, isSubmitting also returns to false, so a
+    //   naive check would treat failure as success and silently reset the
+    //   user's input mid-flow.
+    //
+    // On failure the modal stays open with the user's text intact, so they
+    // can read the error toast, fix the problem, and retry without
+    // re-entering claim and sources. The promiseToast in useSubmitClaim
+    // surfaces success/failure messages.
+    if (isSuccess) {
       resetForm();
       setIsOpen(false);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isSubmitting]);
+  }, [isSuccess]);
 
   const claimTooLong = claimText.length > CLAIM_MAX_LENGTH;
 
   return (
     <Dialog open={isOpen} onOpenChange={handleOpenChange}>
       <DialogTrigger asChild>
-        <Button variant="gradient" disabled={!isConnected || !address || isLoading}>
+        <Button
+          variant="gradient"
+          disabled={!isConnected || !address || !isOnCorrectNetwork || isLoading}
+          title={
+            !isConnected
+              ? "Connect your wallet first"
+              : !isOnCorrectNetwork
+              ? "Switch MetaMask to GenLayer Studio first"
+              : undefined
+          }
+        >
           <Plus className="w-4 h-4 mr-2" />
           Submit Claim
         </Button>
@@ -284,13 +318,43 @@ export function SubmitClaimModal() {
             </div>
           </div>
 
-          {/* Wallet not connected warning */}
+          {/* Wallet status warning: not connected, or connected to wrong network.
+              Two distinct states, two distinct calls to action. */}
           {!isConnected && (
             <Alert variant="default" className="bg-yellow-500/10 border-yellow-500/20">
               <AlertCircle className="h-4 w-4 text-yellow-500" />
               <AlertTitle>Wallet not connected</AlertTitle>
               <AlertDescription className="text-xs">
                 Connect your MetaMask wallet to submit claims on-chain.
+              </AlertDescription>
+            </Alert>
+          )}
+
+          {isConnected && !isOnCorrectNetwork && (
+            <Alert variant="destructive" className="bg-destructive/10 border-destructive/30">
+              <AlertCircle className="h-4 w-4 text-destructive" />
+              <AlertTitle>Wrong network</AlertTitle>
+              <AlertDescription className="text-xs space-y-2">
+                <p>
+                  Your wallet is connected to a different network. Switch
+                  MetaMask to GenLayer Studio before submitting.
+                </p>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={handleSwitchNetwork}
+                  disabled={isSwitchingNetwork}
+                >
+                  {isSwitchingNetwork ? (
+                    <>
+                      <Loader2 className="w-3 h-3 mr-2 animate-spin" />
+                      Switching...
+                    </>
+                  ) : (
+                    "Switch to GenLayer"
+                  )}
+                </Button>
               </AlertDescription>
             </Alert>
           )}
@@ -310,7 +374,7 @@ export function SubmitClaimModal() {
               type="submit"
               variant="gradient"
               className="flex-1"
-              disabled={isSubmitting}
+              disabled={isSubmitting || !isOnCorrectNetwork}
             >
               {isSubmitting ? (
                 <>
