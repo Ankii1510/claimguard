@@ -55,14 +55,12 @@ def test_get_source_for_unknown_domain_returns_zeros(
     assert src["domain"] == "never-voted.com"
 
 
-def test_vote_source_case_sensitive_on_source_record(
+def test_vote_source_case_insensitive_on_source_record(
     direct_vm, direct_deploy, direct_alice, direct_bob
 ):
-    """Source records are keyed by the exact domain string of the first
-    vote. The Source record for EXAMPLE.com and example.com are distinct.
-    (Vote counts use lowercase keys for aggregation, but the Source record
-    itself preserves case - this is an intentional quirk of the contract,
-    see _ensure_source in contracts/claim_guard.py.)"""
+    """Source records are keyed by the canonicalized (lowercased) domain, so
+    EXAMPLE.com and example.com share the same Source record and the same
+    reputation, regardless of which case each voter used."""
     contract = direct_deploy("contracts/claim_guard.py")
 
     direct_vm.sender = direct_alice
@@ -71,13 +69,38 @@ def test_vote_source_case_sensitive_on_source_record(
     direct_vm.sender = direct_bob
     contract.vote_source("example.com", True)
 
-    # Each domain case is its own Source record.
+    # Both votes land on the single, canonical "example.com" Source record.
     src_upper = contract.get_source("EXAMPLE.com")
     src_lower = contract.get_source("example.com")
-    assert src_upper["up_votes"] == "1"
-    assert src_upper["domain"] == "EXAMPLE.com"
-    assert src_lower["up_votes"] == "1"
+    assert src_upper == src_lower
+    assert src_lower["up_votes"] == "2"
     assert src_lower["domain"] == "example.com"
+
+
+def test_vote_source_same_voter_different_case_does_not_corrupt_counters(
+    direct_vm, direct_deploy, direct_alice
+):
+    """Regression test: previously, _vote_key lowercased the domain while
+    _ensure_source/sources[domain] did not, so the same voter voting on two
+    different-case spellings of the same domain would read/write two
+    different Source records. That let a vote toggle land on the wrong
+    record's counter, driving it negative and inflating net reputation past
+    what real votes justify - silently defeating the negative-reputation
+    rejection in submit_claim. Canonicalizing the domain everywhere fixes
+    this: a down-vote followed by an up-vote (different case, same voter) on
+    the same domain must net to a single up-vote, with no negative counters."""
+    contract = direct_deploy("contracts/claim_guard.py")
+    direct_vm.sender = direct_alice
+
+    contract.vote_source("Example.com", False)
+    contract.vote_source("example.com", True)
+
+    src = contract.get_source("EXAMPLE.COM")
+    assert int(src["up_votes"]) >= 0
+    assert int(src["down_votes"]) >= 0
+    assert src["up_votes"] == "1"
+    assert src["down_votes"] == "0"
+    assert src["reputation"] == 1
 
 
 def test_vote_source_toggle_up_down_up_resets(
