@@ -164,17 +164,24 @@ class ClaimGuard {
    */
   async getClaims(): Promise<Claim[]> {
     try {
+      console.log("=== ClaimGuard DEBUG ===");
+      console.log("Contract:", this.contractAddress);
+      console.log("Studio URL:", this.studioUrl);
+
       const raw: any = await this.client.readContract({
         address: this.contractAddress,
         functionName: "get_claims",
         args: [],
       });
 
+      console.log("get_claims RAW:", raw);
+
       const claims: Claim[] = [];
 
       for (const [owner, claimMap] of this.toEntries(raw)) {
         for (const [id, dataRaw] of this.toEntries(claimMap)) {
           const data = this.toObject(dataRaw);
+
           claims.push({
             id: String(id),
             text: String(data.text ?? ""),
@@ -188,10 +195,18 @@ class ClaimGuard {
         }
       }
 
+      console.log("Parsed claims:", claims);
+
       return claims;
-    } catch (error) {
-      console.error("Error fetching claims:", error);
-      throw wrapError("Failed to fetch claims from contract", error);
+    } catch (error: any) {
+      console.error("=== GET CLAIMS FAILED ===");
+      console.error("Full error:", error);
+      console.error("Message:", error?.message);
+      console.error("Cause:", error?.cause);
+      console.error("Details:", error?.details);
+      console.error("Short message:", error?.shortMessage);
+
+      throw error;
     }
   }
 
