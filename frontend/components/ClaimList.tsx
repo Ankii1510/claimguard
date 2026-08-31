@@ -30,7 +30,9 @@ import {
   DialogTitle,
 } from "./ui/dialog";
 import { Alert, AlertDescription, AlertTitle } from "./ui/alert";
+import { Label } from "./ui/label";
 import type { Claim, Verdict } from "@/lib/contracts/types";
+import type { FeePresetLevel } from "@/lib/genlayer/fees";
 
 function verdictBadge(verdict: Verdict) {
   switch (verdict) {
@@ -74,6 +76,8 @@ interface VerifyConfirmDialogProps {
   onOpenChange: (open: boolean) => void;
   onConfirm: () => void;
   isVerifying: boolean;
+  feePresetLevel: FeePresetLevel;
+  onFeePresetChange: (level: FeePresetLevel) => void;
 }
 
 function VerifyConfirmDialog({
@@ -82,6 +86,8 @@ function VerifyConfirmDialog({
   onOpenChange,
   onConfirm,
   isVerifying,
+  feePresetLevel,
+  onFeePresetChange,
 }: VerifyConfirmDialogProps) {
   if (!claim) return null;
 
@@ -107,7 +113,7 @@ function VerifyConfirmDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-3 my-2">
+        <div className="space-y-4 my-2">
           <div className="brand-card p-3">
             <p className="text-sm font-medium leading-relaxed">
               &ldquo;{claim.text}&rdquo;
@@ -122,6 +128,39 @@ function VerifyConfirmDialog({
               sure your sources are accurate.
             </AlertDescription>
           </Alert>
+
+          {/* Fee preset selector - mirrors the SubmitClaimModal pattern so
+              the user has explicit control over appeal rounds instead of
+              being silently defaulted to "standard". */}
+          <div className="space-y-2">
+            <Label className="text-xs">Fee Preset (appeal rounds)</Label>
+            <div className="grid grid-cols-3 gap-2">
+              {(
+                [
+                  { value: "low", label: "Low", detail: "No appeals" },
+                  { value: "standard", label: "Standard", detail: "1 appeal" },
+                  { value: "high", label: "High", detail: "2 appeals" },
+                ] as const
+              ).map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  onClick={() => onFeePresetChange(option.value)}
+                  disabled={isVerifying}
+                  className={`rounded-md border px-3 py-2 text-left transition-all ${
+                    feePresetLevel === option.value
+                      ? "border-accent bg-accent/20 text-accent"
+                      : "border-white/10 hover:border-white/20"
+                  }`}
+                >
+                  <div className="text-sm font-semibold">{option.label}</div>
+                  <div className="mt-0.5 text-xs text-muted-foreground">
+                    {option.detail}
+                  </div>
+                </button>
+              ))}
+            </div>
+          </div>
         </div>
 
         <DialogFooter className="gap-2">
@@ -161,6 +200,7 @@ export function ClaimList() {
   const { verifyClaim, isVerifying, verifyingClaimId } = useVerifyClaim();
 
   const [pendingVerifyId, setPendingVerifyId] = useState<string | null>(null);
+  const [feePresetLevel, setFeePresetLevel] = useState<FeePresetLevel>("standard");
 
   const claimForDialog =
     claims?.find((c) => c.id === pendingVerifyId) ?? null;
@@ -175,7 +215,7 @@ export function ClaimList() {
 
   const handleConfirmVerify = () => {
     if (pendingVerifyId) {
-      verifyClaim(pendingVerifyId);
+      verifyClaim(pendingVerifyId, feePresetLevel);
       setPendingVerifyId(null);
     }
   };
