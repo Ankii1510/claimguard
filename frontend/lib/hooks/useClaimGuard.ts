@@ -1,17 +1,20 @@
 "use client";
 
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import ClaimGuard from "../contracts/ClaimGuard";
 import { getContractAddress, getStudioUrl } from "../genlayer/client";
 import type { FeePresetLevel } from "../genlayer/fees";
 import { useWallet } from "../genlayer/wallet";
-import { success, error, configError } from "../utils/toast";
+import { configError, promise as promiseToast } from "../utils/toast";
 import type { Claim } from "../contracts/types";
 
 /**
  * Hook to get the ClaimGuard contract instance.
  * Returns null if the contract address is not configured.
+ *
+ * Setup errors are surfaced once via a persistent toast in a useEffect
+ * (not in useMemo) so they don't spam on every render.
  */
 export function useClaimGuardContract(): ClaimGuard | null {
   const { address } = useWallet();
@@ -20,7 +23,19 @@ export function useClaimGuardContract(): ClaimGuard | null {
 
   const contract = useMemo(() => {
     if (!contractAddress) {
-      // Log full diagnostic to console so it's visible in browser DevTools
+      return null;
+    }
+
+    try {
+      return new ClaimGuard(contractAddress, address, studioUrl);
+    } catch (err) {
+      console.error("[ClaimGuard] Failed to initialize contract:", err);
+      return null;
+    }
+  }, [contractAddress, address, studioUrl]);
+
+  useEffect(() => {
+    if (!contractAddress) {
       console.error(
         "[ClaimGuard] NEXT_PUBLIC_CONTRACT_ADDRESS is not set. " +
           "Set it in your .env file (local) or Vercel Project Settings > Environment Variables (production)."
@@ -37,24 +52,8 @@ export function useClaimGuardContract(): ClaimGuard | null {
             ),
         }
       );
-      return null;
     }
-
-    try {
-      return new ClaimGuard(contractAddress, address, studioUrl);
-    } catch (err: any) {
-      console.error("[ClaimGuard] Failed to initialize contract:", err);
-      configError(
-        "Contract init failed",
-        err?.message || String(err),
-        {
-          label: "Setup Guide",
-          onClick: () => window.open("/docs/setup", "_blank"),
-        }
-      );
-      return null;
-    }
-  }, [contractAddress, address, studioUrl]);
+  }, [contractAddress]);
 
   return contract;
 }
@@ -101,6 +100,7 @@ export function useClaimCount() {
 
 /**
  * Hook to submit a new claim.
+ * Surfaces a single tracked loading -> success/error toast for the whole flow.
  */
 export function useSubmitClaim() {
   const contract = useClaimGuardContract();
@@ -108,61 +108,76 @@ export function useSubmitClaim() {
   const queryClient = useQueryClient();
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const mutation = useMutation({
-    mutationFn: async ({
+  const submitClaimFn = async ({
+    claimText,
+    sourceUrls,
+    feePresetLevel,
+  }: {
+    claimText: string;
+    sourceUrls: string;
+    feePresetLevel?: FeePresetLevel;
+  }) => {
+    if (!contract) {
+      throw new Error(
+        "Contract not configured. Please set NEXT_PUBLIC_CONTRACT_ADDRESS in your .env file."
+      );
+    }
+    if (!address) {
+      throw new Error(
+        "Wallet not connected. Please connect your wallet to submit a claim."
+      );
+    }
+    const feePreset = await contract.estimateSubmitClaimFees(
       claimText,
       sourceUrls,
-      feePresetLevel,
-    }: {
-      claimText: string;
-      sourceUrls: string;
-      feePresetLevel?: FeePresetLevel;
-    }) => {
-      if (!contract) {
-        throw new Error(
-          "Contract not configured. Please set NEXT_PUBLIC_CONTRACT_ADDRESS in your .env file."
-        );
-      }
-      if (!address) {
-        throw new Error(
-          "Wallet not connected. Please connect your wallet to submit a claim."
-        );
-      }
-      setIsSubmitting(true);
-      const feePreset = await contract.estimateSubmitClaimFees(
-        claimText,
-        sourceUrls,
-        feePresetLevel ?? "standard"
-      );
-      return contract.submitClaim(claimText, sourceUrls, feePreset);
-    },
+      feePresetLevel ?? "standard"
+    );
+    return contract.submitClaim(claimText, sourceUrls, feePreset);
+  };
+
+  const mutation = useMutation({
+    mutationFn: submitClaimFn,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["claims"] });
       queryClient.invalidateQueries({ queryKey: ["claimCount"] });
-      setIsSubmitting(false);
-      success("Claim submitted successfully!", {
-        description: "Your claim has been recorded on the blockchain.",
-      });
-    },
-    onError: (err: any) => {
-      console.error("Error submitting claim:", err);
-      setIsSubmitting(false);
-      error("Failed to submit claim", {
-        description: err?.message || "Please try again.",
-      });
     },
   });
+
+  const submitClaim = (vars: {
+    claimText: string;
+    sourceUrls: string;
+    feePresetLevel?: FeePresetLevel;
+  }) => {
+    setIsSubmitting(true);
+    // Use mutateAsync so the loading/success/error toast tracks the
+    // same submission that React Query tracks (no double-submit).
+    const promise = mutation.mutateAsync(vars);
+    promiseToast(promise, {
+      loading: "Submitting claim to the blockchain...",
+      success: "Claim submitted and recorded on-chain.",
+      error: (err: any) =>
+        err?.message?.includes("rejected")
+          ? "Submission cancelled in wallet"
+          : `Failed to submit claim: ${err?.message || "unknown error"}`,
+    });
+    promise
+      .finally(() => setIsSubmitting(false))
+      .catch(() => {
+        /* error already handled by promiseToast */
+      });
+  };
 
   return {
     ...mutation,
     isSubmitting,
-    submitClaim: mutation.mutate,
+    submitClaim,
     submitClaimAsync: mutation.mutateAsync,
   };
 }
 
 /**
  * Hook to verify a pending claim.
+ * Surfaces a single tracked loading -> success/error toast for the whole flow.
  */
 export function useVerifyClaim() {
   const contract = useClaimGuardContract();
@@ -171,46 +186,58 @@ export function useVerifyClaim() {
   const [isVerifying, setIsVerifying] = useState(false);
   const [verifyingClaimId, setVerifyingClaimId] = useState<string | null>(null);
 
+  const verifyClaimFn = async (claimId: string) => {
+    if (!contract) {
+      throw new Error(
+        "Contract not configured. Please set NEXT_PUBLIC_CONTRACT_ADDRESS in your .env file."
+      );
+    }
+    if (!address) {
+      throw new Error(
+        "Wallet not connected. Please connect your wallet to verify a claim."
+      );
+    }
+    setVerifyingClaimId(claimId);
+    return contract.verifyClaim(claimId);
+  };
+
   const mutation = useMutation({
-    mutationFn: async (claimId: string) => {
-      if (!contract) {
-        throw new Error(
-          "Contract not configured. Please set NEXT_PUBLIC_CONTRACT_ADDRESS in your .env file."
-        );
-      }
-      if (!address) {
-        throw new Error(
-          "Wallet not connected. Please connect your wallet to verify a claim."
-        );
-      }
-      setIsVerifying(true);
-      setVerifyingClaimId(claimId);
-      return contract.verifyClaim(claimId);
-    },
+    mutationFn: verifyClaimFn,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["claims"] });
       queryClient.invalidateQueries({ queryKey: ["claimCount"] });
-      setIsVerifying(false);
       setVerifyingClaimId(null);
-      success("Claim verified successfully!", {
-        description: "The AI consensus has settled the verdict.",
-      });
-    },
-    onError: (err: any) => {
-      console.error("Error verifying claim:", err);
-      setIsVerifying(false);
-      setVerifyingClaimId(null);
-      error("Failed to verify claim", {
-        description: err?.message || "Please try again.",
-      });
     },
   });
+
+  const verifyClaim = (claimId: string) => {
+    setIsVerifying(true);
+    // Use mutateAsync so the loading/success/error toast tracks the
+    // same submission that React Query tracks (no double-submit).
+    const promise = mutation.mutateAsync(claimId);
+    promiseToast(promise, {
+      loading: "AI validators fetching sources and reaching consensus...",
+      success: "Verdict settled on-chain.",
+      error: (err: any) =>
+        err?.message?.includes("rejected")
+          ? "Verification cancelled in wallet"
+          : `Failed to verify claim: ${err?.message || "unknown error"}`,
+    });
+    promise
+      .finally(() => {
+        setIsVerifying(false);
+        setVerifyingClaimId(null);
+      })
+      .catch(() => {
+        /* error already handled by promiseToast */
+      });
+  };
 
   return {
     ...mutation,
     isVerifying,
     verifyingClaimId,
-    verifyClaim: mutation.mutate,
+    verifyClaim,
     verifyClaimAsync: mutation.mutateAsync,
   };
 }

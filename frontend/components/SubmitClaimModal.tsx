@@ -1,7 +1,7 @@
 "use client";
 
-import { useState, useEffect } from "react";
-import { Plus, Loader2, FileSearch } from "lucide-react";
+import { useMemo, useState, useEffect } from "react";
+import { Plus, Loader2, FileSearch, AlertCircle } from "lucide-react";
 import { useSubmitClaim } from "@/lib/hooks/useClaimGuard";
 import type { FeePresetLevel } from "@/lib/genlayer/fees";
 import { useWallet } from "@/lib/genlayer/wallet";
@@ -16,16 +16,53 @@ import {
   DialogTrigger,
 } from "./ui/dialog";
 import { Label } from "./ui/label";
+import { Alert, AlertDescription, AlertTitle } from "./ui/alert";
+
+const CLAIM_MAX_LENGTH = 500;
+
+type FieldErrors = {
+  claimText?: string;
+  sourceUrls?: string;
+};
+
+function validateUrls(raw: string): string | null {
+  const lines = raw
+    .split("\n")
+    .map((u) => u.trim())
+    .filter(Boolean);
+
+  if (lines.length === 0) {
+    return "Add at least one source URL";
+  }
+
+  for (const url of lines) {
+    if (!/^https?:\/\//i.test(url)) {
+      return `URL must start with http:// or https://: ${url}`;
+    }
+    try {
+      // eslint-disable-next-line no-new
+      new URL(url);
+    } catch {
+      return `Invalid URL: ${url}`;
+    }
+  }
+
+  return null;
+}
 
 export function SubmitClaimModal() {
   const { isConnected, address, isLoading } = useWallet();
-  const { submitClaim, isSubmitting, isSuccess } = useSubmitClaim();
+  const { submitClaim, isSubmitting } = useSubmitClaim();
 
   const [isOpen, setIsOpen] = useState(false);
   const [claimText, setClaimText] = useState("");
   const [sourceUrls, setSourceUrls] = useState("");
   const [feePresetLevel, setFeePresetLevel] = useState<FeePresetLevel>("standard");
-  const [errors, setErrors] = useState({ claimText: "" });
+  const [errors, setErrors] = useState<FieldErrors>({});
+  const [touched, setTouched] = useState<{ claimText: boolean; sourceUrls: boolean }>({
+    claimText: false,
+    sourceUrls: false,
+  });
 
   // Auto-close modal when wallet disconnects
   useEffect(() => {
@@ -34,13 +71,28 @@ export function SubmitClaimModal() {
     }
   }, [isConnected, isOpen, isSubmitting]);
 
+  const urlCount = useMemo(
+    () =>
+      sourceUrls
+        .split("\n")
+        .map((u) => u.trim())
+        .filter(Boolean).length,
+    [sourceUrls]
+  );
+
   const validateForm = (): boolean => {
+    const next: FieldErrors = {};
     if (!claimText.trim()) {
-      setErrors({ claimText: "Claim text is required" });
-      return false;
+      next.claimText = "Claim text is required";
+    } else if (claimText.length > CLAIM_MAX_LENGTH) {
+      next.claimText = `Claim is too long (max ${CLAIM_MAX_LENGTH} chars)`;
     }
-    setErrors({ claimText: "" });
-    return true;
+    const urlError = validateUrls(sourceUrls);
+    if (urlError) {
+      next.sourceUrls = urlError;
+    }
+    setErrors(next);
+    return Object.keys(next).length === 0;
   };
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -50,6 +102,8 @@ export function SubmitClaimModal() {
       error("Please connect your wallet first");
       return;
     }
+
+    setTouched({ claimText: true, sourceUrls: true });
 
     if (!validateForm()) {
       return;
@@ -65,7 +119,8 @@ export function SubmitClaimModal() {
   const resetForm = () => {
     setClaimText("");
     setSourceUrls("");
-    setErrors({ claimText: "" });
+    setErrors({});
+    setTouched({ claimText: false, sourceUrls: false });
   };
 
   const handleOpenChange = (open: boolean) => {
@@ -76,11 +131,18 @@ export function SubmitClaimModal() {
   };
 
   useEffect(() => {
-    if (isSuccess) {
+    // mutate() doesn't expose isSuccess directly anymore; treat the transition
+    // from submitting -> idle as success and close the modal. Since the parent
+    // toast handles the message, we just react to isSubmitting turning false.
+    if (!isSubmitting && touched.claimText && claimText) {
+      // Likely finished a submit successfully; close the modal.
       resetForm();
       setIsOpen(false);
     }
-  }, [isSuccess]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isSubmitting]);
+
+  const claimTooLong = claimText.length > CLAIM_MAX_LENGTH;
 
   return (
     <Dialog open={isOpen} onOpenChange={handleOpenChange}>
@@ -101,21 +163,45 @@ export function SubmitClaimModal() {
         <form onSubmit={handleSubmit} className="space-y-5 mt-4">
           {/* Claim text */}
           <div className="space-y-2">
-            <Label htmlFor="claimText" className="flex items-center gap-2">
-              <FileSearch className="w-4 h-4 !text-white" />
-              Claim
-            </Label>
+            <div className="flex items-center justify-between">
+              <Label htmlFor="claimText" className="flex items-center gap-2">
+                <FileSearch className="w-4 h-4 !text-white" />
+                Claim
+              </Label>
+              <span
+                className={`text-xs ${
+                  claimTooLong
+                    ? "text-destructive"
+                    : "text-muted-foreground"
+                }`}
+              >
+                {claimText.length}/{CLAIM_MAX_LENGTH}
+              </span>
+            </div>
             <textarea
               id="claimText"
               value={claimText}
               onChange={(e) => {
                 setClaimText(e.target.value);
-                setErrors({ ...errors, claimText: "" });
+                if (touched.claimText) {
+                  setErrors((prev) => ({ ...prev, claimText: undefined }));
+                }
+              }}
+              onBlur={() => {
+                setTouched((t) => ({ ...t, claimText: true }));
+                if (!claimText.trim()) {
+                  setErrors((prev) => ({
+                    ...prev,
+                    claimText: "Claim text is required",
+                  }));
+                }
               }}
               placeholder='e.g. "Ethereum switched to proof-of-stake in September 2022"'
               rows={3}
               className={`w-full rounded-md border bg-input/50 px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring ${
-                errors.claimText ? "border-destructive" : "border-border"
+                errors.claimText
+                  ? "border-destructive"
+                  : "border-border"
               }`}
             />
             {errors.claimText && (
@@ -125,19 +211,47 @@ export function SubmitClaimModal() {
 
           {/* Source URLs */}
           <div className="space-y-2">
-            <Label htmlFor="sourceUrls">Source URLs (one per line)</Label>
+            <div className="flex items-center justify-between">
+              <Label htmlFor="sourceUrls">Source URLs (one per line)</Label>
+              {urlCount > 0 && (
+                <span className="text-xs text-muted-foreground">
+                  {urlCount} URL{urlCount === 1 ? "" : "s"}
+                </span>
+              )}
+            </div>
             <textarea
               id="sourceUrls"
               value={sourceUrls}
-              onChange={(e) => setSourceUrls(e.target.value)}
+              onChange={(e) => {
+                setSourceUrls(e.target.value);
+                if (touched.sourceUrls) {
+                  setErrors((prev) => ({ ...prev, sourceUrls: undefined }));
+                }
+              }}
+              onBlur={() => {
+                setTouched((t) => ({ ...t, sourceUrls: true }));
+                const urlError = validateUrls(sourceUrls);
+                if (urlError) {
+                  setErrors((prev) => ({ ...prev, sourceUrls: urlError }));
+                }
+              }}
               placeholder="https://example.com/article\nhttps://en.wikipedia.org/wiki/..."
               rows={4}
-              className="w-full rounded-md border border-border bg-input/50 px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring font-mono"
+              className={`w-full rounded-md border bg-input/50 px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring font-mono ${
+                errors.sourceUrls
+                  ? "border-destructive"
+                  : "border-border"
+              }`}
             />
-            <p className="text-xs text-muted-foreground">
-              The contract fetches these pages and lets AI validators judge the
-              claim against them.
-            </p>
+            {errors.sourceUrls && (
+              <p className="text-xs text-destructive">{errors.sourceUrls}</p>
+            )}
+            {!errors.sourceUrls && (
+              <p className="text-xs text-muted-foreground">
+                The contract fetches these pages and lets AI validators judge
+                the claim against them.
+              </p>
+            )}
           </div>
 
           {/* Fee preset */}
@@ -169,6 +283,17 @@ export function SubmitClaimModal() {
               ))}
             </div>
           </div>
+
+          {/* Wallet not connected warning */}
+          {!isConnected && (
+            <Alert variant="default" className="bg-yellow-500/10 border-yellow-500/20">
+              <AlertCircle className="h-4 w-4 text-yellow-500" />
+              <AlertTitle>Wallet not connected</AlertTitle>
+              <AlertDescription className="text-xs">
+                Connect your MetaMask wallet to submit claims on-chain.
+              </AlertDescription>
+            </Alert>
+          )}
 
           {/* Actions */}
           <div className="flex gap-3 pt-4">

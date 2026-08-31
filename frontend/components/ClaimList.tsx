@@ -1,12 +1,35 @@
 "use client";
 
-import { Loader2, CheckCircle2, XCircle, HelpCircle, Clock, AlertCircle } from "lucide-react";
-import { useClaims, useVerifyClaim, useClaimGuardContract } from "@/lib/hooks/useClaimGuard";
+import { useState } from "react";
+import {
+  Loader2,
+  CheckCircle2,
+  XCircle,
+  HelpCircle,
+  Clock,
+  AlertCircle,
+  RefreshCw,
+  ShieldCheck,
+} from "lucide-react";
+import {
+  useClaims,
+  useVerifyClaim,
+  useClaimGuardContract,
+} from "@/lib/hooks/useClaimGuard";
 import { useWallet } from "@/lib/genlayer/wallet";
 import { error } from "@/lib/utils/toast";
 import { AddressDisplay } from "./AddressDisplay";
 import { Button } from "./ui/button";
 import { Badge } from "./ui/badge";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "./ui/dialog";
+import { Alert, AlertDescription, AlertTitle } from "./ui/alert";
 import type { Claim, Verdict } from "@/lib/contracts/types";
 
 function verdictBadge(verdict: Verdict) {
@@ -34,7 +57,10 @@ function verdictBadge(verdict: Verdict) {
       );
     default:
       return (
-        <Badge variant="outline" className="text-yellow-400 border-yellow-500/30">
+        <Badge
+          variant="outline"
+          className="text-yellow-400 border-yellow-500/30"
+        >
           <Clock className="w-3 h-3 mr-1" />
           Pending
         </Badge>
@@ -42,22 +68,121 @@ function verdictBadge(verdict: Verdict) {
   }
 }
 
+interface VerifyConfirmDialogProps {
+  claim: Claim | null;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onConfirm: () => void;
+  isVerifying: boolean;
+}
+
+function VerifyConfirmDialog({
+  claim,
+  open,
+  onOpenChange,
+  onConfirm,
+  isVerifying,
+}: VerifyConfirmDialogProps) {
+  if (!claim) return null;
+
+  const sourceCount = claim.source_urls
+    ? claim.source_urls
+        .split("\n")
+        .map((u) => u.trim())
+        .filter(Boolean).length
+    : 0;
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="brand-card border-2 sm:max-w-[480px]">
+        <DialogHeader>
+          <DialogTitle className="text-xl font-bold flex items-center gap-2">
+            <ShieldCheck className="w-5 h-5 text-accent" />
+            Verify this claim?
+          </DialogTitle>
+          <DialogDescription>
+            GenLayer AI validators will fetch {sourceCount || "your"}{" "}
+            {sourceCount === 1 ? "source" : "sources"} and settle a verdict
+            on-chain.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-3 my-2">
+          <div className="brand-card p-3">
+            <p className="text-sm font-medium leading-relaxed">
+              &ldquo;{claim.text}&rdquo;
+            </p>
+          </div>
+
+          <Alert variant="default" className="bg-accent/5 border-accent/20">
+            <AlertCircle className="h-4 w-4 text-accent" />
+            <AlertTitle className="text-sm">This is irreversible</AlertTitle>
+            <AlertDescription className="text-xs">
+              Once a verdict is settled on-chain, it can&apos;t be undone. Make
+              sure your sources are accurate.
+            </AlertDescription>
+          </Alert>
+        </div>
+
+        <DialogFooter className="gap-2">
+          <Button
+            type="button"
+            variant="secondary"
+            onClick={() => onOpenChange(false)}
+            disabled={isVerifying}
+          >
+            Cancel
+          </Button>
+          <Button
+            type="button"
+            variant="gradient"
+            onClick={onConfirm}
+            disabled={isVerifying}
+          >
+            {isVerifying ? (
+              <>
+                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                Verifying...
+              </>
+            ) : (
+              "Verify Claim"
+            )}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 export function ClaimList() {
   const contract = useClaimGuardContract();
-  const { data: claims, isLoading, isError } = useClaims();
+  const { data: claims, isLoading, isError, refetch } = useClaims();
   const { address } = useWallet();
   const { verifyClaim, isVerifying, verifyingClaimId } = useVerifyClaim();
 
-  const handleVerify = (claimId: string) => {
+  const [pendingVerifyId, setPendingVerifyId] = useState<string | null>(null);
+
+  const claimForDialog =
+    claims?.find((c) => c.id === pendingVerifyId) ?? null;
+
+  const handleVerifyClick = (claimId: string) => {
     if (!address) {
       error("Please connect your wallet to verify a claim");
       return;
     }
-    const confirmed = confirm(
-      "Verify this claim? GenLayer AI validators will fetch the sources and settle a verdict."
-    );
-    if (confirmed) {
-      verifyClaim(claimId);
+    setPendingVerifyId(claimId);
+  };
+
+  const handleConfirmVerify = () => {
+    if (pendingVerifyId) {
+      verifyClaim(pendingVerifyId);
+      setPendingVerifyId(null);
+    }
+  };
+
+  const handleDialogOpenChange = (open: boolean) => {
+    if (!open && !isVerifying) {
+      setPendingVerifyId(null);
     }
   };
 
@@ -92,9 +217,20 @@ export function ClaimList() {
 
   if (isError) {
     return (
-      <div className="brand-card p-8">
-        <div className="text-center">
-          <p className="text-destructive">Failed to load claims. Please try again.</p>
+      <div className="brand-card p-6">
+        <Alert variant="destructive">
+          <AlertCircle className="h-4 w-4" />
+          <AlertTitle>Failed to load claims</AlertTitle>
+          <AlertDescription>
+            We couldn&apos;t reach the contract. Check your network and try
+            again.
+          </AlertDescription>
+        </Alert>
+        <div className="flex justify-center mt-4">
+          <Button variant="outline" onClick={() => refetch()}>
+            <RefreshCw className="w-4 h-4 mr-2" />
+            Try again
+          </Button>
         </div>
       </div>
     );
@@ -115,17 +251,27 @@ export function ClaimList() {
   }
 
   return (
-    <div className="space-y-4">
-      {claims.map((claim) => (
-        <ClaimCard
-          key={`${claim.owner}-${claim.id}`}
-          claim={claim}
-          currentAddress={address}
-          onVerify={handleVerify}
-          isVerifying={isVerifying && verifyingClaimId === claim.id}
-        />
-      ))}
-    </div>
+    <>
+      <div className="space-y-4">
+        {claims.map((claim) => (
+          <ClaimCard
+            key={`${claim.owner}-${claim.id}`}
+            claim={claim}
+            currentAddress={address}
+            onVerify={handleVerifyClick}
+            isVerifying={isVerifying && verifyingClaimId === claim.id}
+          />
+        ))}
+      </div>
+
+      <VerifyConfirmDialog
+        claim={claimForDialog}
+        open={!!pendingVerifyId}
+        onOpenChange={handleDialogOpenChange}
+        onConfirm={handleConfirmVerify}
+        isVerifying={isVerifying && verifyingClaimId === pendingVerifyId}
+      />
+    </>
   );
 }
 
@@ -136,11 +282,15 @@ interface ClaimCardProps {
   isVerifying: boolean;
 }
 
-function ClaimCard({ claim, currentAddress, onVerify, isVerifying }: ClaimCardProps) {
+function ClaimCard({
+  claim,
+  currentAddress,
+  onVerify,
+  isVerifying,
+}: ClaimCardProps) {
   const isOwner =
     currentAddress?.toLowerCase() === claim.owner?.toLowerCase();
-  const canVerify =
-    isOwner && !claim.has_resolved;
+  const canVerify = isOwner && !claim.has_resolved;
 
   return (
     <div className="brand-card brand-card-hover p-5 animate-fade-in">
@@ -156,7 +306,11 @@ function ClaimCard({ claim, currentAddress, onVerify, isVerifying }: ClaimCardPr
             )}
           </div>
           <div className="flex items-center gap-2 shrink-0">
-            <AddressDisplay address={claim.owner} maxLength={10} showCopy={true} />
+            <AddressDisplay
+              address={claim.owner}
+              maxLength={10}
+              showCopy={true}
+            />
             {isOwner && (
               <Badge variant="secondary" className="text-xs">
                 You
@@ -166,7 +320,9 @@ function ClaimCard({ claim, currentAddress, onVerify, isVerifying }: ClaimCardPr
         </div>
 
         {/* Claim text */}
-        <p className="text-base font-medium leading-relaxed">&ldquo;{claim.text}&rdquo;</p>
+        <p className="text-base font-medium leading-relaxed">
+          &ldquo;{claim.text}&rdquo;
+        </p>
 
         {/* Reasoning (resolved only) */}
         {claim.has_resolved && claim.reasoning && (
