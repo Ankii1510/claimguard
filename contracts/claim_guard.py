@@ -142,6 +142,22 @@ class ClaimGuard(gl.Contract):
         self.claim_count = u256(0)
         self.challenge_count = u256(0)
 
+        # UPGRADABILITY: register the deploying account as the sole initial
+        # upgrader. This exact two-line pattern is taken verbatim from
+        # GenLayer's own "Upgradability" docs page
+        # (https://docs.genlayer.com/developers/intelligent-contracts/features/upgradability).
+        # GenVM itself enforces this - the docs confirm the contract's
+        # initialization automatically locks the upgraders slot against
+        # non-upgraders, so this is not a check this contract has to
+        # implement or could get wrong. See upgrade() below for why this
+        # was added: GenLayer Studio's testnet resets periodically, wiping
+        # every deployed contract's address - upgradability doesn't survive
+        # that (a full reset wipes storage too, upgraders included), but it
+        # does mean a *code* fix, deployed once, never needs a fresh
+        # address again for as long as this instance's storage survives.
+        root = gl.storage.Root.get()
+        root.upgraders.get().append(gl.message.sender_address)
+
     # ---- helpers -----------------------------------------------------------
 
     def _parse_urls(self, source_urls: str) -> list:
@@ -488,3 +504,54 @@ class ClaimGuard(gl.Contract):
     @gl.public.view
     def get_escrow(self, addr_hex: str) -> int:
         return int(self.escrow.get(addr_hex) or "0")
+
+    # ---- upgradability -------------------------------------------------
+
+    @gl.public.write
+    def upgrade(self, new_code: bytes) -> None:
+        """Replaces this contract's code in place, keeping its address and
+        all existing storage (claims, sources, votes, challenges, escrow)
+        unchanged. This exact body is taken verbatim from GenLayer's own
+        "Upgradability" docs page
+        (https://docs.genlayer.com/developers/intelligent-contracts/features/upgradability).
+
+        Only an address in `root.upgraders` (see __init__ and
+        get_upgraders() below) can call this successfully - GenVM itself
+        enforces this by locking the code slot against non-upgraders, not a
+        check this method has to perform itself. A non-upgrader's call
+        fails with GenVM's own VMError before this body ever runs.
+
+        SECURITY TRADEOFF, STATED PLAINLY: this is real, permanent power to
+        replace this contract's logic entirely. It is granted here only to
+        the deploying account (see __init__), so it does not introduce a
+        new trusted party. get_upgraders() lets anyone verify on-chain, at
+        any time, exactly which address(es) hold this power.
+
+        STORAGE COMPATIBILITY, PER THE DOCS: "the new code must understand
+        the existing storage layout" - there is no automatic migration, so
+        an upgrade that changes a stored dataclass's shape (adding,
+        removing or retyping a Claim/Source/Challenge field) needs a
+        one-time migration step of its own; this has not been exercised in
+        this project and should be treated as unconfirmed until it has.
+
+        NOTE: this does NOT help with GenLayer Studio's periodic testnet
+        resets - a reset wipes this contract's storage entirely (including
+        the upgraders list itself), so the address becomes unusable either
+        way and a fresh deployment (with a new address) is still required
+        after a reset. Upgradability only avoids a new address for a *code*
+        fix pushed to a still-live deployment.
+        """
+        root = gl.storage.Root.get()
+        code = root.code.get()
+        code.truncate()
+        code.extend(new_code)
+
+    @gl.public.view
+    def get_upgraders(self) -> list[str]:
+        """Transparency view: which addresses currently hold the power to
+        replace this contract's code (see upgrade() above and __init__'s
+        registration of the deploying account as the initial upgrader).
+        Lets anyone - not just the upgrader(s) - verify on-chain who holds
+        this power, without trusting an off-chain claim."""
+        root = gl.storage.Root.get()
+        return [addr.as_hex for addr in root.upgraders.get()]

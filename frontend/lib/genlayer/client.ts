@@ -48,8 +48,10 @@ export const GENLAYER_CHAIN = {
   nativeCurrency: GENLAYER_NETWORK.nativeCurrency,
 };
 
-// Ethereum provider type from window
-interface EthereumProvider {
+// Ethereum provider type from window (or an EIP-6963-announced wallet - see
+// eip6963.ts). Exported so eip6963.ts and WalletProvider.tsx can share it
+// instead of redeclaring an ad-hoc shape.
+export interface EthereumProvider {
   isMetaMask?: boolean;
   request: (args: { method: string; params?: any[] }) => Promise<any>;
   on: (event: string, handler: (...args: any[]) => void) => void;
@@ -89,15 +91,13 @@ export function getContractAddress(): string {
 }
 
 /**
- * Check if MetaMask is installed
- */
-export function isMetaMaskInstalled(): boolean {
-  if (typeof window === "undefined") return false;
-  return !!window.ethereum?.isMetaMask;
-}
-
-/**
- * Get the Ethereum provider (MetaMask)
+ * Legacy single-slot provider lookup (`window.ethereum`). With exactly one
+ * wallet extension installed this is fine; with two or more it's whichever
+ * extension last overwrote the slot - silently picking a wallet for the
+ * user. `eip6963.ts`'s `subscribeToAnnouncedProviders` is the standardized
+ * fix (EIP-6963: every compliant wallet announces itself instead of fighting
+ * over one global) and is what WalletProvider now uses first; this stays
+ * only as the fallback for wallets that don't implement EIP-6963 yet.
  */
 export function getEthereumProvider(): EthereumProvider | null {
   if (typeof window === "undefined") return null;
@@ -107,21 +107,17 @@ export function getEthereumProvider(): EthereumProvider | null {
 /**
  * Wait for window.ethereum to be injected by a browser wallet extension.
  *
- * MetaMask (and most EIP-1193 wallets) inject `window.ethereum` into the
- * page asynchronously, sometimes a beat after React has already mounted
- * and run its first effects. Checking `window.ethereum` synchronously on
- * mount is a race: on a fresh page load / hard refresh the check can run
- * before injection finishes, wrongly conclude "wallet not installed", and
- * get stuck there - the UI then only "sees" the wallet after the user
- * manually opens the extension (which happens to finish the injection)
- * and reloads. That's the "auto-detect" bug: the wallet is installed and
- * running, the page just checked too early.
- *
- * MetaMask dispatches an `ethereum#initialized` event on `window` once
- * injection completes, so we wait for that. A short poll is kept as a
- * fallback for wallets that inject `window.ethereum` without firing the
- * event, and a timeout guards against waiting forever when no wallet
- * extension is actually installed.
+ * Only relevant to the legacy `window.ethereum` fallback above - EIP-6963
+ * discovery (eip6963.ts) doesn't need this because it stays subscribed for
+ * the component's lifetime and reacts whenever a wallet announces itself,
+ * however late. A non-EIP-6963 wallet only exposes `window.ethereum`
+ * though, and extensions inject it asynchronously (sometimes after React
+ * has already mounted), so a plain synchronous check here can run before
+ * injection finishes and wrongly conclude "no wallet". MetaMask (and most
+ * such wallets) dispatch `ethereum#initialized` once injection completes,
+ * so we wait for that, with a short poll as a fallback for wallets that
+ * skip the event, and a timeout so we don't wait forever when nothing is
+ * actually installed.
  */
 export function waitForEthereumProvider(
   timeoutMs: number = 3000
@@ -157,16 +153,10 @@ export function waitForEthereumProvider(
 }
 
 /**
- * Request accounts from MetaMask
+ * Request accounts from a wallet provider (prompts the connect popup).
  * @returns Array of addresses
  */
-export async function requestAccounts(): Promise<string[]> {
-  const provider = getEthereumProvider();
-
-  if (!provider) {
-    throw new Error("MetaMask is not installed");
-  }
-
+export async function requestAccounts(provider: EthereumProvider): Promise<string[]> {
   try {
     const accounts = await provider.request({
       method: "eth_requestAccounts",
@@ -176,17 +166,15 @@ export async function requestAccounts(): Promise<string[]> {
     if (error.code === 4001) {
       throw new Error("User rejected the connection request");
     }
-    throw new Error(`Failed to connect to MetaMask: ${error.message}`);
+    throw new Error(`Failed to connect to wallet: ${error.message}`);
   }
 }
 
 /**
- * Get current MetaMask accounts without requesting permission
+ * Get accounts already authorized for this site, without prompting.
  * @returns Array of addresses
  */
-export async function getAccounts(): Promise<string[]> {
-  const provider = getEthereumProvider();
-
+export async function getAccounts(provider: EthereumProvider | null): Promise<string[]> {
   if (!provider) {
     return [];
   }
@@ -203,11 +191,9 @@ export async function getAccounts(): Promise<string[]> {
 }
 
 /**
- * Get the current chain ID from MetaMask
+ * Get the current chain ID from a wallet provider.
  */
-export async function getCurrentChainId(): Promise<string | null> {
-  const provider = getEthereumProvider();
-
+export async function getCurrentChainId(provider: EthereumProvider | null): Promise<string | null> {
   if (!provider) {
     return null;
   }
@@ -224,15 +210,9 @@ export async function getCurrentChainId(): Promise<string | null> {
 }
 
 /**
- * Add GenLayer network to MetaMask
+ * Add GenLayer network to a wallet provider.
  */
-export async function addGenLayerNetwork(): Promise<void> {
-  const provider = getEthereumProvider();
-
-  if (!provider) {
-    throw new Error("MetaMask is not installed");
-  }
-
+export async function addGenLayerNetwork(provider: EthereumProvider): Promise<void> {
   try {
     await provider.request({
       method: "wallet_addEthereumChain",
@@ -247,15 +227,9 @@ export async function addGenLayerNetwork(): Promise<void> {
 }
 
 /**
- * Switch to GenLayer network
+ * Switch a wallet provider to the GenLayer network.
  */
-export async function switchToGenLayerNetwork(): Promise<void> {
-  const provider = getEthereumProvider();
-
-  if (!provider) {
-    throw new Error("MetaMask is not installed");
-  }
-
+export async function switchToGenLayerNetwork(provider: EthereumProvider): Promise<void> {
   try {
     await provider.request({
       method: "wallet_switchEthereumChain",
@@ -264,7 +238,7 @@ export async function switchToGenLayerNetwork(): Promise<void> {
   } catch (error: any) {
     // If the chain is not added, add it
     if (error.code === 4902) {
-      await addGenLayerNetwork();
+      await addGenLayerNetwork(provider);
     } else if (error.code === 4001) {
       throw new Error("User rejected switching the network");
     } else {
@@ -274,10 +248,10 @@ export async function switchToGenLayerNetwork(): Promise<void> {
 }
 
 /**
- * Check if we're on the GenLayer network
+ * Check if a wallet provider is currently on the GenLayer network.
  */
-export async function isOnGenLayerNetwork(): Promise<boolean> {
-  const chainId = await getCurrentChainId();
+export async function isOnGenLayerNetwork(provider: EthereumProvider | null): Promise<boolean> {
+  const chainId = await getCurrentChainId(provider);
 
   if (!chainId) {
     return false;
@@ -289,44 +263,33 @@ export async function isOnGenLayerNetwork(): Promise<boolean> {
 }
 
 /**
- * Connect to MetaMask and ensure we're on GenLayer network
+ * Connect to a wallet provider and ensure it's on the GenLayer network.
  * @returns The connected address
  */
-export async function connectMetaMask(): Promise<string> {
-  if (!isMetaMaskInstalled()) {
-    throw new Error("MetaMask is not installed");
-  }
-
-  // Request accounts
-  const accounts = await requestAccounts();
+export async function connectWalletProvider(provider: EthereumProvider): Promise<string> {
+  const accounts = await requestAccounts(provider);
 
   if (!accounts || accounts.length === 0) {
     throw new Error("No accounts found");
   }
 
   // Check and switch to GenLayer network
-  const onCorrectNetwork = await isOnGenLayerNetwork();
+  const onCorrectNetwork = await isOnGenLayerNetwork(provider);
 
   if (!onCorrectNetwork) {
-    await switchToGenLayerNetwork();
+    await switchToGenLayerNetwork(provider);
   }
 
   return accounts[0];
 }
 
 /**
- * Request user to switch MetaMask account
- * Shows MetaMask account picker even if already connected
+ * Request the user to switch accounts on a wallet provider.
+ * Shows the wallet's account picker even if already connected.
  * Uses wallet_requestPermissions to force account selection dialog
  * @returns The newly selected account address
  */
-export async function switchAccount(): Promise<string> {
-  const provider = getEthereumProvider();
-
-  if (!provider) {
-    throw new Error("MetaMask is not installed");
-  }
-
+export async function switchWalletAccount(provider: EthereumProvider): Promise<string> {
   try {
     // Request permissions - this shows account picker
     await provider.request({
@@ -355,11 +318,9 @@ export async function switchAccount(): Promise<string> {
 }
 
 /**
- * Create a viem wallet client from MetaMask provider
+ * Create a viem wallet client from a given wallet provider.
  */
-export function createMetaMaskWalletClient(): WalletClient | null {
-  const provider = getEthereumProvider();
-
+export function createMetaMaskWalletClient(provider: EthereumProvider | null): WalletClient | null {
   if (!provider) {
     return null;
   }
@@ -403,10 +364,14 @@ export function createGenLayerClient(address?: string) {
 }
 
 /**
- * Get a client instance with MetaMask account
+ * Get a client instance using the legacy window.ethereum slot's account,
+ * if any. Not used by WalletProvider (which goes through EIP-6963 /
+ * getAccounts(provider) with an explicitly resolved provider) - kept for
+ * any external caller that only has the legacy provider available.
  */
 export async function getClient() {
-  const accounts = await getAccounts();
+  const provider = getEthereumProvider();
+  const accounts = await getAccounts(provider);
   const address = accounts[0];
   return createGenLayerClient(address);
 }

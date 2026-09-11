@@ -1,5 +1,10 @@
 import { createClient } from "genlayer-js";
 import { GENLAYER_CHAIN } from "../genlayer/client";
+import {
+  ContractRevertError,
+  isResourceNotFoundError,
+  friendlyResourceNotFoundMessage,
+} from "../genlayer/errors";
 import type { Claim, TransactionReceipt } from "./types";
 import {
   estimateWriteFeePreset,
@@ -7,6 +12,16 @@ import {
   type FeePresetEstimate,
   type FeePresetLevel,
 } from "../genlayer/fees";
+
+// waitForTransactionReceipt's own default (genlayer-js's transactionsConfig)
+// is a 3s interval x 10 retries = 30s total - too short for real multi-
+// validator consensus, which routinely takes longer than that even on
+// Studio. A client-side timeout here is NOT evidence the transaction
+// failed, just evidence this app gave up checking too early - so this is
+// widened to 5s x 60 = 5 minutes, giving a normal submit/verify/challenge/
+// consume call a realistic chance to actually finish before this throws.
+const WAIT_FOR_RECEIPT_INTERVAL_MS = 5000;
+const WAIT_FOR_RECEIPT_RETRIES = 60;
 
 /**
  * Wrap an error from the underlying SDK / RPC with a context prefix while
@@ -19,18 +34,57 @@ import {
  *   - invalid contract address
  *   - simulation failure
  *   - transaction rejected in wallet
- *   - contract not found (Studio testnet reset)
+ *   - contract not found (Studio testnet reset) - see genlayer/errors.ts
+ *
+ * A resource-not-found RPC error (contract missing on this network) and a
+ * ContractRevertError (the contract itself rejected the call - see
+ * checkExecutionResult below) are both recognized specially and given a
+ * plain-language, actionable message instead of the raw SDK text.
  *
  * Setting `.cause` keeps the original error reachable for structured logging
  * and React error boundaries; embedding the inner message in the new Error
  * keeps backwards-compatible string handling working (e.g. `err.message`).
  */
-function wrapError(prefix: string, original: unknown): Error {
+function wrapError(prefix: string, original: unknown, contractAddress?: string): Error {
+  if (original instanceof ContractRevertError) {
+    const err = new Error(`${prefix}: ${original.rawReason}`);
+    (err as Error & { cause?: unknown }).cause = original;
+    return err;
+  }
+
+  if (isResourceNotFoundError(original) && contractAddress) {
+    const err = new Error(`${prefix}: ${friendlyResourceNotFoundMessage(contractAddress)}`);
+    (err as Error & { cause?: unknown }).cause = original;
+    return err;
+  }
+
   const inner = original instanceof Error ? original : new Error(String(original));
   const message = inner.message ? `${prefix}: ${inner.message}` : prefix;
   const err = new Error(message);
   (err as Error & { cause?: unknown }).cause = inner;
   return err;
+}
+
+/**
+ * A finalized/decided transaction can still have failed execution (a
+ * `gl.vm.UserError` raised in the contract, or validators not reaching
+ * consensus) - `waitForTransactionReceipt` resolving is NOT itself proof
+ * the write succeeded. Without this check, submitClaim/verifyClaim would
+ * resolve "successfully" on a revert, showing a false success toast while
+ * nothing actually changed on-chain. Throws ContractRevertError (caught by
+ * wrapError above) with the contract's own message (e.g. "Source rejected
+ * by community governance: ...", "Claim already verified") when execution
+ * failed; does nothing otherwise.
+ */
+function checkExecutionResult(receipt: any): void {
+  const resultName = receipt?.txExecutionResultName ?? receipt?.tx_execution_result;
+  if (resultName !== "FINISHED_WITH_ERROR") return;
+
+  const leaderReceipts = receipt?.consensus_data?.leader_receipt;
+  const firstError = Array.isArray(leaderReceipts)
+    ? leaderReceipts.find((r: any) => r?.error)?.error
+    : undefined;
+  throw new ContractRevertError(firstError || "The contract rejected this transaction.");
 }
 
 /**
@@ -197,7 +251,7 @@ class ClaimGuard {
         shortMessage: error?.shortMessage,
       });
 
-      throw error;
+      throw wrapError("Failed to load claims", error, this.contractAddress);
     }
   }
 
@@ -241,14 +295,15 @@ class ClaimGuard {
       const receipt = await this.client.waitForTransactionReceipt({
         hash: txHash,
         waitUntil: "decided",
-        retries: 24,
-        interval: 5000,
+        retries: WAIT_FOR_RECEIPT_RETRIES,
+        interval: WAIT_FOR_RECEIPT_INTERVAL_MS,
       });
+      checkExecutionResult(receipt);
 
       return receipt as TransactionReceipt;
     } catch (error) {
       console.error("Error submitting claim:", error);
-      throw wrapError("Failed to submit claim", error);
+      throw wrapError("Failed to submit claim", error, this.contractAddress);
     }
   }
 
@@ -277,14 +332,15 @@ class ClaimGuard {
       const receipt = await this.client.waitForTransactionReceipt({
         hash: txHash,
         waitUntil: "decided",
-        retries: 24,
-        interval: 5000,
+        retries: WAIT_FOR_RECEIPT_RETRIES,
+        interval: WAIT_FOR_RECEIPT_INTERVAL_MS,
       });
+      checkExecutionResult(receipt);
 
       return receipt as TransactionReceipt;
     } catch (error) {
       console.error("Error verifying claim:", error);
-      throw wrapError("Failed to verify claim", error);
+      throw wrapError("Failed to verify claim", error, this.contractAddress);
     }
   }
 }
