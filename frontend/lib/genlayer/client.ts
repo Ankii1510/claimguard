@@ -105,6 +105,58 @@ export function getEthereumProvider(): EthereumProvider | null {
 }
 
 /**
+ * Wait for window.ethereum to be injected by a browser wallet extension.
+ *
+ * MetaMask (and most EIP-1193 wallets) inject `window.ethereum` into the
+ * page asynchronously, sometimes a beat after React has already mounted
+ * and run its first effects. Checking `window.ethereum` synchronously on
+ * mount is a race: on a fresh page load / hard refresh the check can run
+ * before injection finishes, wrongly conclude "wallet not installed", and
+ * get stuck there - the UI then only "sees" the wallet after the user
+ * manually opens the extension (which happens to finish the injection)
+ * and reloads. That's the "auto-detect" bug: the wallet is installed and
+ * running, the page just checked too early.
+ *
+ * MetaMask dispatches an `ethereum#initialized` event on `window` once
+ * injection completes, so we wait for that. A short poll is kept as a
+ * fallback for wallets that inject `window.ethereum` without firing the
+ * event, and a timeout guards against waiting forever when no wallet
+ * extension is actually installed.
+ */
+export function waitForEthereumProvider(
+  timeoutMs: number = 3000
+): Promise<EthereumProvider | null> {
+  if (typeof window === "undefined") return Promise.resolve(null);
+  if (window.ethereum) return Promise.resolve(window.ethereum);
+
+  return new Promise((resolve) => {
+    let settled = false;
+
+    const finish = (provider: EthereumProvider | null) => {
+      if (settled) return;
+      settled = true;
+      window.removeEventListener("ethereum#initialized", onInitialized);
+      clearInterval(pollId);
+      clearTimeout(timeoutId);
+      resolve(provider);
+    };
+
+    const onInitialized = () => finish(window.ethereum || null);
+    window.addEventListener("ethereum#initialized", onInitialized, {
+      once: true,
+    });
+
+    // Fallback for wallets that inject window.ethereum without firing
+    // "ethereum#initialized".
+    const pollId = setInterval(() => {
+      if (window.ethereum) finish(window.ethereum);
+    }, 100);
+
+    const timeoutId = setTimeout(() => finish(window.ethereum || null), timeoutMs);
+  });
+}
+
+/**
  * Request accounts from MetaMask
  * @returns Array of addresses
  */

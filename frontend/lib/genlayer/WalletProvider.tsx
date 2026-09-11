@@ -2,14 +2,13 @@
 
 import React, { createContext, useContext, useState, useEffect, useCallback, ReactNode } from "react";
 import {
-  isMetaMaskInstalled,
   connectMetaMask,
   switchAccount,
   switchToGenLayerNetwork,
   getAccounts,
   getCurrentChainId,
   isOnGenLayerNetwork,
-  getEthereumProvider,
+  waitForEthereumProvider,
   GENLAYER_CHAIN_ID,
 } from "./client";
 import { error, userRejected, warning } from "../utils/toast";
@@ -50,10 +49,19 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     isOnCorrectNetwork: false,
   });
 
-  // Check MetaMask installation and load account on mount
+  // Check MetaMask installation and load account on mount.
+  //
+  // Waits for window.ethereum injection (waitForEthereumProvider) instead
+  // of checking isMetaMaskInstalled() synchronously. MetaMask injects the
+  // provider asynchronously, so a synchronous check on the very first
+  // effect run can fire before injection completes and wrongly conclude
+  // "not installed" - which then never re-checks, so the wallet only got
+  // "auto-detected" after the user manually opened the extension (forcing
+  // injection) and refreshed. Waiting here fixes real auto-detection.
   useEffect(() => {
     const initWallet = async () => {
-      const installed = isMetaMaskInstalled();
+      const provider = await waitForEthereumProvider();
+      const installed = !!provider?.isMetaMask;
 
       if (!installed) {
         setState({
@@ -119,13 +127,17 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     initWallet();
   }, []);
 
-  // Set up MetaMask event listeners (ONCE for entire app)
+  // Set up MetaMask event listeners (ONCE for entire app).
+  //
+  // Same injection race as initWallet above: a plain getEthereumProvider()
+  // on mount can run before window.ethereum exists and silently return
+  // with no listeners ever attached (this effect has no deps, so it never
+  // retries). Waiting for injection here too means accountsChanged /
+  // chainChanged / disconnect actually get wired up even when the
+  // extension finishes injecting a moment after mount.
   useEffect(() => {
-    const provider = getEthereumProvider();
-
-    if (!provider) {
-      return;
-    }
+    let cancelled = false;
+    let cleanupListeners: (() => void) | undefined;
 
     const handleAccountsChanged = async (accounts: string[]) => {
       const chainId = await getCurrentChainId();
@@ -169,16 +181,28 @@ export function WalletProvider({ children }: { children: ReactNode }) {
       }));
     };
 
-    // Add event listeners
-    provider.on("accountsChanged", handleAccountsChanged);
-    provider.on("chainChanged", handleChainChanged);
-    provider.on("disconnect", handleDisconnect);
+    waitForEthereumProvider().then((provider) => {
+      if (!provider || cancelled) {
+        return;
+      }
 
-    // Cleanup
+      provider.on("accountsChanged", handleAccountsChanged);
+      provider.on("chainChanged", handleChainChanged);
+      provider.on("disconnect", handleDisconnect);
+
+      cleanupListeners = () => {
+        provider.removeListener("accountsChanged", handleAccountsChanged);
+        provider.removeListener("chainChanged", handleChainChanged);
+        provider.removeListener("disconnect", handleDisconnect);
+      };
+    });
+
+    // Cleanup: if the provider showed up and listeners were attached,
+    // remove them; if we're still waiting, `cancelled` stops the
+    // then() callback from attaching listeners after unmount.
     return () => {
-      provider.removeListener("accountsChanged", handleAccountsChanged);
-      provider.removeListener("chainChanged", handleChainChanged);
-      provider.removeListener("disconnect", handleDisconnect);
+      cancelled = true;
+      cleanupListeners?.();
     };
   }, []);
 

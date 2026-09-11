@@ -164,17 +164,11 @@ class ClaimGuard {
    */
   async getClaims(): Promise<Claim[]> {
     try {
-      console.log("=== ClaimGuard DEBUG ===");
-      console.log("Contract:", this.contractAddress);
-      console.log("Studio URL:", this.studioUrl);
-
       const raw: any = await this.client.readContract({
         address: this.contractAddress,
         functionName: "get_claims",
         args: [],
       });
-
-      console.log("get_claims RAW:", raw);
 
       const claims: Claim[] = [];
 
@@ -195,16 +189,13 @@ class ClaimGuard {
         }
       }
 
-      console.log("Parsed claims:", claims);
-
       return claims;
     } catch (error: any) {
-      console.error("=== GET CLAIMS FAILED ===");
-      console.error("Full error:", error);
-      console.error("Message:", error?.message);
-      console.error("Cause:", error?.cause);
-      console.error("Details:", error?.details);
-      console.error("Short message:", error?.shortMessage);
+      console.error("Error fetching claims:", error?.message || error, {
+        cause: error?.cause,
+        details: error?.details,
+        shortMessage: error?.shortMessage,
+      });
 
       throw error;
     }
@@ -249,7 +240,7 @@ class ClaimGuard {
 
       const receipt = await this.client.waitForTransactionReceipt({
         hash: txHash,
-        status: "ACCEPTED" as any,
+        waitUntil: "decided",
         retries: 24,
         interval: 5000,
       });
@@ -285,7 +276,7 @@ class ClaimGuard {
 
       const receipt = await this.client.waitForTransactionReceipt({
         hash: txHash,
-        status: "ACCEPTED" as any,
+        waitUntil: "decided",
         retries: 24,
         interval: 5000,
       });
