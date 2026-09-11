@@ -195,7 +195,7 @@ function VerifyConfirmDialog({
 
 export function ClaimList() {
   const contract = useClaimGuardContract();
-  const { data: claims, isLoading, isError, refetch } = useClaims();
+  const { data: claims, isLoading, isError, error: claimsError, refetch } = useClaims();
   const { address } = useWallet();
   const { verifyClaim, isVerifying, verifyingClaimId } = useVerifyClaim();
 
@@ -256,15 +256,21 @@ export function ClaimList() {
   }
 
   if (isError) {
+    // ClaimGuard.getClaims() already throws a wrapped Error with the real,
+    // specific reason (contract not found on this network, revert reason,
+    // RPC/network failure, etc. - see wrapError in lib/contracts/ClaimGuard.ts).
+    // Previously this branch discarded that entirely and always showed the
+    // same generic "check your network" text, which made every failure mode
+    // (including a plain contract-not-found / wrong-address case) look like
+    // a local connectivity problem - actively misleading when debugging.
+    const message =
+      claimsError?.message || "We couldn't reach the contract. Check your network and try again.";
     return (
       <div className="brand-card p-6">
         <Alert variant="destructive">
           <AlertCircle className="h-4 w-4" />
           <AlertTitle>Failed to load claims</AlertTitle>
-          <AlertDescription>
-            We couldn&apos;t reach the contract. Check your network and try
-            again.
-          </AlertDescription>
+          <AlertDescription>{message}</AlertDescription>
         </Alert>
         <div className="flex justify-center mt-4">
           <Button variant="outline" onClick={() => refetch()}>
