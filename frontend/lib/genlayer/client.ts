@@ -82,12 +82,32 @@ export function getContractAddress(): string {
     // Return empty string during build, error will be shown in UI during runtime
     return "";
   }
-  // GenLayer Studio displays contract addresses with mixed case that does NOT
-  // follow the EIP-55 checksum standard. viem (used by genlayer-js) rejects
-  // addresses whose mixed-case pattern does not validate as EIP-55. The
-  // underlying 20-byte address is case-insensitive, so lowercase is safe and
-  // is accepted by both viem and the GenLayer RPC.
-  return address.trim().toLowerCase();
+  // IMPORTANT: do NOT lowercase this address.
+  //
+  // This used to call `.toLowerCase()` here on the theory that the
+  // underlying 20-byte address is case-insensitive EVM-side, so lowercase
+  // would be a "safe" normalized form accepted everywhere. That is true for
+  // plain EVM `eth_*` calls, but it is FALSE for GenLayer Studio's own
+  // `gen_call` endpoint (what genlayer-js's readContract/writeContract
+  // actually use): Studio looks up a deployed contract by an exact,
+  // case-sensitive string match against the address it returned at deploy
+  // time, not a checksum-normalized or case-folded one.
+  //
+  // Verified directly against the live Studio RPC (studio.genlayer.com/api):
+  // the exact same address, differing only in letter case, returns a full
+  // contract schema / successful gen_call for the deploy-time casing, and
+  // "Contract <address> not found" (RPC code -32001) for the lowercased
+  // version - for a contract that unquestionably exists (freshly deployed,
+  // finalized, readable seconds earlier under its original casing). This
+  // was the real cause behind every "Contract not found" error this app
+  // hit after a deploy - not Studio testnet resets, not RPC propagation
+  // delay, not a network mismatch, just this normalization silently
+  // breaking every read/write the moment it ran.
+  //
+  // So: keep whatever casing the user pasted into NEXT_PUBLIC_CONTRACT_ADDRESS
+  // (i.e. exactly what `genlayer deploy` printed as "Contract Address"),
+  // trimmed only.
+  return address.trim();
 }
 
 /**
