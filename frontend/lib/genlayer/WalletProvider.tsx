@@ -29,7 +29,18 @@ export interface WalletState {
 }
 
 interface WalletContextValue extends WalletState {
-  connectWallet: () => Promise<string>;
+  // Every EIP-6963-announced wallet detected so far (MetaMask, Rabby,
+  // Coinbase Wallet, Brave Wallet, ...). Empty when none have announced yet
+  // (including the common case of exactly one wallet installed but not
+  // implementing EIP-6963 - that one is only reachable via the legacy
+  // window.ethereum fallback inside connectWallet/resolveProvider, so it
+  // won't show up in this list). UI uses this to render a wallet picker
+  // when there's more than one to choose from.
+  wallets: EIP6963ProviderDetail[];
+  // Pass a specific wallet's `rdns` (from `wallets`) to connect that one;
+  // omit it to use the previous default behavior (first EIP-6963-announced
+  // wallet, or the legacy window.ethereum slot if none announced).
+  connectWallet: (rdns?: string) => Promise<string>;
   disconnectWallet: () => void;
   switchWalletAccount: () => Promise<string>;
   switchToCorrectNetwork: () => Promise<void>;
@@ -48,8 +59,10 @@ const WalletContext = createContext<WalletContextValue | undefined>(undefined);
  *      Wallet, ...) announces itself. Stays subscribed for this provider's
  *      whole lifetime, so a wallet that injects/announces a moment after
  *      first render is still picked up - no arbitrary "give up" timeout.
- *      With more than one wallet announced, this app (no wallet-picker UI)
- *      simply uses the first one discovered.
+ *      All announced wallets are exposed as `wallets`; AccountPanel shows a
+ *      picker when there's more than one, and connectWallet(rdns) connects
+ *      the one the user picked. With no explicit choice, the first one
+ *      discovered is used (unchanged legacy behavior).
  *   2. Legacy `window.ethereum` (waitForEthereumProvider) - fallback for a
  *      wallet that doesn't implement EIP-6963 yet, so it isn't left
  *      unsupported.
@@ -85,17 +98,31 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   }, []);
 
   /**
-   * Resolve which provider to act on: the first EIP-6963-announced wallet
-   * if any have announced themselves, otherwise fall back to the legacy
-   * `window.ethereum` slot (waiting briefly for it to be injected - see
-   * waitForEthereumProvider's docstring for why that wait is needed).
+   * Resolve which provider to act on.
+   *
+   * With an explicit `rdns` (the user picked a specific wallet from the
+   * picker in AccountPanel): look it up among the announced wallets and
+   * return exactly that one, or null if it's no longer there (extension was
+   * disabled/uninstalled between render and click) - never silently fall
+   * back to a different wallet than the one the user chose.
+   *
+   * Without one: the first EIP-6963-announced wallet if any have announced
+   * themselves, otherwise the legacy `window.ethereum` slot (waiting
+   * briefly for it to be injected - see waitForEthereumProvider's docstring
+   * for why that wait is needed).
    */
-  const resolveProvider = useCallback(async (): Promise<EthereumProvider | null> => {
-    if (announcedWallets.length > 0) {
-      return announcedWallets[0].provider;
-    }
-    return waitForEthereumProvider();
-  }, [announcedWallets]);
+  const resolveProvider = useCallback(
+    async (rdns?: string): Promise<EthereumProvider | null> => {
+      if (rdns) {
+        return announcedWallets.find((w) => w.info.rdns === rdns)?.provider ?? null;
+      }
+      if (announcedWallets.length > 0) {
+        return announcedWallets[0].provider;
+      }
+      return waitForEthereumProvider();
+    },
+    [announcedWallets]
+  );
 
   const hasWallet = announcedWallets.length > 0 || (typeof window !== "undefined" && !!getEthereumProvider());
 
@@ -235,15 +262,21 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   }, [activeProvider]);
 
   /**
-   * Connect to a wallet (first EIP-6963-announced one, or the legacy slot)
+   * Connect to a wallet. Pass `rdns` to connect a specific wallet chosen
+   * from the picker (see `wallets`); omit it to fall back to the first
+   * EIP-6963-announced one, or the legacy slot if none announced.
    */
-  const connectWallet = useCallback(async () => {
+  const connectWallet = useCallback(async (rdns?: string) => {
     try {
       setState((prev) => ({ ...prev, isLoading: true }));
 
-      const provider = await resolveProvider();
+      const provider = await resolveProvider(rdns);
       if (!provider) {
-        throw new Error("No wallet extension detected. Install a browser wallet to connect.");
+        throw new Error(
+          rdns
+            ? "That wallet is no longer available. Please pick another one."
+            : "No wallet extension detected. Install a browser wallet to connect."
+        );
       }
 
       const address = await connectWalletProvider(provider);
@@ -409,6 +442,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
 
   const value: WalletContextValue = {
     ...state,
+    wallets: announcedWallets,
     connectWallet,
     disconnectWallet,
     switchWalletAccount,

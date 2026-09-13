@@ -25,6 +25,7 @@ export function AccountPanel() {
     isMetaMaskInstalled,
     isOnCorrectNetwork,
     isLoading,
+    wallets,
     connectWallet,
     disconnectWallet,
     switchWalletAccount,
@@ -32,32 +33,40 @@ export function AccountPanel() {
 
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [connectionError, setConnectionError] = useState("");
-  const [isConnecting, setIsConnecting] = useState(false);
+  // Which wallet (by rdns) is currently mid-connect, so only that option's
+  // button shows a loading state instead of the whole list going disabled
+  // with no indication of which one was clicked.
+  const [connectingRdns, setConnectingRdns] = useState<string | null>(null);
   const [isSwitching, setIsSwitching] = useState(false);
 
-  const handleConnect = async () => {
+  const isConnecting = connectingRdns !== null;
+
+  // `rdns` selects a specific EIP-6963-announced wallet (from the picker
+  // below); omit it for the single "Connect Wallet" button path, which
+  // falls back to whichever wallet the legacy window.ethereum slot holds.
+  const handleConnect = async (rdns?: string) => {
     if (!isMetaMaskInstalled) {
       return;
     }
 
     try {
-      setIsConnecting(true);
+      setConnectingRdns(rdns ?? "__legacy__");
       setConnectionError("");
-      await connectWallet();
+      await connectWallet(rdns);
       setIsModalOpen(false);
     } catch (err: any) {
       console.error("Failed to connect wallet:", err);
-      setConnectionError(err.message || "Failed to connect to MetaMask");
+      setConnectionError(err.message || "Failed to connect wallet");
 
       if (err.message?.includes("rejected")) {
         userRejected("Connection cancelled");
       } else {
         error("Failed to connect wallet", {
-          description: err.message || "Check your MetaMask and try again."
+          description: err.message || "Check your wallet and try again."
         });
       }
     } finally {
-      setIsConnecting(false);
+      setConnectingRdns(null);
     }
   };
 
@@ -105,7 +114,7 @@ export function AccountPanel() {
               Connect to GenLayer
             </DialogTitle>
             <DialogDescription>
-              Connect your MetaMask wallet to start fact-checking
+              Connect a wallet to start fact-checking
             </DialogDescription>
           </DialogHeader>
 
@@ -137,16 +146,78 @@ export function AccountPanel() {
                   </p>
                 </div>
               </>
+            ) : wallets.length > 1 ? (
+              <>
+                <p className="text-sm text-muted-foreground">
+                  Choose a wallet to connect:
+                </p>
+                <div className="space-y-2">
+                  {wallets.map((w) => (
+                    <Button
+                      key={w.info.rdns}
+                      onClick={() => handleConnect(w.info.rdns)}
+                      variant="outline"
+                      className="w-full h-14 text-lg justify-start"
+                      disabled={isConnecting}
+                    >
+                      {w.info.icon ? (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img
+                          src={w.info.icon}
+                          alt=""
+                          className="w-6 h-6 mr-3 rounded"
+                        />
+                      ) : (
+                        <User className="w-5 h-5 mr-3" />
+                      )}
+                      {connectingRdns === w.info.rdns
+                        ? "Connecting..."
+                        : w.info.name}
+                    </Button>
+                  ))}
+                </div>
+
+                {connectionError && (
+                  <Alert variant="destructive">
+                    <AlertCircle className="h-4 w-4" />
+                    <AlertTitle>Connection Error</AlertTitle>
+                    <AlertDescription>{connectionError}</AlertDescription>
+                  </Alert>
+                )}
+
+                <div className="p-4 rounded-lg bg-muted/10 border border-muted/20">
+                  <p className="text-xs text-muted-foreground">
+                    {wallets.length} wallets detected. Pick the one you want
+                    to use - this will prompt it to:
+                  </p>
+                  <ol className="text-xs text-muted-foreground list-decimal list-inside mt-2 space-y-1">
+                    <li>Connect your wallet to this application</li>
+                    <li>Add the GenLayer network (if needed)</li>
+                    <li>Switch to the GenLayer network</li>
+                  </ol>
+                </div>
+              </>
             ) : (
               <>
                 <Button
-                  onClick={handleConnect}
+                  onClick={() => handleConnect(wallets[0]?.info.rdns)}
                   variant="gradient"
                   className="w-full h-14 text-lg"
                   disabled={isConnecting}
                 >
-                  <User className="w-5 h-5 mr-2" />
-                  {isConnecting ? "Connecting..." : "Connect MetaMask"}
+                  {wallets[0]?.info.icon ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img
+                      src={wallets[0].info.icon}
+                      alt=""
+                      className="w-5 h-5 mr-2 rounded"
+                    />
+                  ) : (
+                    <User className="w-5 h-5 mr-2" />
+                  )}
+                  {isConnecting
+                    ? "Connecting..."
+                    : `Connect ${wallets[0]?.info.name ?? "Wallet"}`}
                 </Button>
 
                 {connectionError && (
@@ -159,11 +230,12 @@ export function AccountPanel() {
 
                 <div className="p-4 rounded-lg bg-muted/10 border border-muted/20">
                   <p className="text-xs text-muted-foreground">
-                    This will open MetaMask and prompt you to:
+                    This will open {wallets[0]?.info.name ?? "your wallet"} and
+                    prompt you to:
                   </p>
                   <ol className="text-xs text-muted-foreground list-decimal list-inside mt-2 space-y-1">
                     <li>Connect your wallet to this application</li>
-                    <li>Add the GenLayer network to MetaMask</li>
+                    <li>Add the GenLayer network (if needed)</li>
                     <li>Switch to the GenLayer network</li>
                   </ol>
                 </div>
@@ -200,7 +272,7 @@ export function AccountPanel() {
             Wallet Details
           </DialogTitle>
           <DialogDescription>
-            Your connected MetaMask wallet information
+            Your connected wallet information
           </DialogDescription>
         </DialogHeader>
 
@@ -271,9 +343,9 @@ export function AccountPanel() {
 
           <div className="p-4 rounded-lg bg-muted/10 border border-muted/20">
             <p className="text-xs text-muted-foreground">
-              Use &quot;Switch Account&quot; to select a different MetaMask
-              account. Use &quot;Disconnect&quot; to remove this site from
-              MetaMask.
+              Use &quot;Switch Account&quot; to select a different account in
+              your wallet. Use &quot;Disconnect&quot; to remove this site
+              from it.
             </p>
           </div>
         </div>
