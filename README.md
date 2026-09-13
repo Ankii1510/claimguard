@@ -2,6 +2,16 @@
 
 An on-chain fact-checking oracle built on GenLayer.
 
+## Live Demo
+
+- **App:** https://claimguard-frontend.vercel.app/
+- **Contract:** `0x807ef8CdD084613bc9334d0fC6f1273aA6b7aD45` (GenLayer Studio, chain id 61999)
+- **Explorer:** https://explorer-studio.genlayer.com/address/0x807ef8CdD084613bc9334d0fC6f1273aA6b7aD45
+
+Connect any EIP-6963-compatible wallet (MetaMask or others - a picker appears
+automatically if you have more than one installed), submit a claim with 2-3
+source URLs, and click Verify to watch AI validators fetch the sources and
+settle a TRUE / FALSE / UNCERTAIN verdict on-chain.
 ClaimGuard lets anyone submit a natural-language claim plus web sources. An
 Intelligent Contract fetches the sources, asks an LLM to judge the claim, and
 settles a TRUE / FALSE / UNCERTAIN verdict through multi-validator AI consensus
