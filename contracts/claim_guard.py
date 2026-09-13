@@ -105,6 +105,122 @@ def _deserialize_claim(raw: str) -> dict:
     return json.loads(raw)
 
 
+def _parse_verdict_json(raw: str) -> dict:
+    """Defensively parse the leader LLM's verdict JSON.
+
+    The model is asked (see _analyze's prompt) for exactly one JSON object:
+    {"verdict": "TRUE", "confidence": 95, "reasoning": "..."}. Like any LLM
+    call, the response can occasionally get cut off before it finishes (hit
+    its own output-length limit mid-sentence) or get wrapped in a markdown
+    code fence. A bare `json.loads(raw)` then raises JSONDecodeError and the
+    whole verify_claim/challenge_claim transaction reverts with an opaque
+    Python traceback - even though the model's actual verdict, confidence
+    and reasoning are sitting right there in the truncated text.
+
+    Observed live on Studio: a real leader response cut off as
+        {"verdict": "TRUE", "confidence": 100, "reasoning": "The evidence
+        explicitly states that Mount Everest is the highest mountain on
+        Earth above sea level."
+    (no closing brace) - failed json.loads and reverted a transaction that
+    had otherwise succeeded end-to-end (sources fetched, LLM judged the
+    claim, validators reached consensus on this exact text).
+
+    Recovery strategy, each tried in order, first success wins:
+      1. Parse `raw` as-is.
+      2. Strip a ```...``` / ```json...``` markdown fence, if present.
+      3. Assume truncation happened right after the reasoning string (the
+         observed failure mode) and retry with a closing quote+brace, then
+         just a closing brace, appended.
+      4. Manual field-by-field extraction - no `re` (GenVM's Python subset
+         support for it is unconfirmed), just str.find/slicing - tolerant
+         of a missing trailing brace or a mid-string cutoff.
+
+    Raises gl.vm.UserError (never a raw JSONDecodeError) only if every
+    strategy fails, so a genuinely unusable response still reverts with a
+    clear, actionable message instead of silently fabricating a verdict.
+    """
+
+    def try_load(s):
+        try:
+            return json.loads(s)
+        except Exception:
+            return None
+
+    candidate = raw.strip()
+
+    parsed = try_load(candidate)
+    if parsed is not None:
+        return parsed
+
+    if candidate.startswith("```"):
+        first_newline = candidate.find("\n")
+        if first_newline != -1:
+            fenced = candidate[first_newline + 1 :].rstrip()
+            if fenced.endswith("```"):
+                fenced = fenced[:-3]
+            parsed = try_load(fenced.strip())
+            if parsed is not None:
+                return parsed
+
+    # Truncation recovery: close an unterminated string, then the object.
+    for suffix in ('"}', "}"):
+        parsed = try_load(candidate + suffix)
+        if parsed is not None:
+            return parsed
+
+    def extract_string_field(name: str):
+        idx = candidate.find('"' + name + '"')
+        if idx == -1:
+            return None
+        idx = candidate.find(":", idx)
+        if idx == -1:
+            return None
+        idx = candidate.find('"', idx)
+        if idx == -1:
+            return None
+        idx += 1
+        end = candidate.find('"', idx)
+        while end != -1 and candidate[end - 1] == "\\":
+            end = candidate.find('"', end + 1)
+        if end == -1:
+            # Truncated mid-string: best effort, take what's left.
+            return candidate[idx:]
+        return candidate[idx:end]
+
+    def extract_int_field(name: str):
+        idx = candidate.find('"' + name + '"')
+        if idx == -1:
+            return None
+        idx = candidate.find(":", idx)
+        if idx == -1:
+            return None
+        idx += 1
+        while idx < len(candidate) and candidate[idx] == " ":
+            idx += 1
+        digits = ""
+        while idx < len(candidate) and candidate[idx].isdigit():
+            digits += candidate[idx]
+            idx += 1
+        if digits == "":
+            return None
+        return int(digits)
+
+    verdict = extract_string_field("verdict")
+    if verdict is not None:
+        confidence = extract_int_field("confidence")
+        reasoning = extract_string_field("reasoning")
+        return {
+            "verdict": verdict,
+            "confidence": confidence if confidence is not None else 0,
+            "reasoning": reasoning if reasoning is not None else "",
+        }
+
+    raise gl.vm.UserError(
+        "AI validator's response could not be parsed (it was likely cut "
+        "off mid-response). Please try verifying this claim again."
+    )
+
+
 class ClaimGuard(gl.Contract):
     """ClaimGuard: an on-chain fact-checking oracle with source governance.
 
@@ -267,8 +383,12 @@ class ClaimGuard(gl.Contract):
             )
 
         # prompt_non_comparative returns the leader's string output (or dict).
+        # See _parse_verdict_json's docstring for why this isn't a bare
+        # json.loads(raw): a truncated/fenced LLM response would otherwise
+        # revert the whole transaction with an opaque JSONDecodeError even
+        # though the verdict was already generated correctly.
         if isinstance(raw, str):
-            return json.loads(raw)
+            return _parse_verdict_json(raw)
         return raw
 
     # ---- source governance -------------------------------------------------
